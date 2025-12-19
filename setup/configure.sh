@@ -45,6 +45,36 @@ fi
 
 cp -f /etc/openvpn/setup/openvpn.conf /etc/openvpn/openvpn.conf
 
+# Add DNS servers if configured (comma-separated list, e.g., "1.1.1.1,8.8.8.8")
+if [[ -n "${OVPN_DNS:-}" ]]; then
+  IFS=',' read -ra DNS_SERVERS <<< "$OVPN_DNS"
+  for dns in "${DNS_SERVERS[@]}"; do
+    echo "push \"dhcp-option DNS $dns\"" >> /etc/openvpn/openvpn.conf
+  done
+fi
+
+# Add routes if configured (comma-separated CIDR, e.g., "10.0.0.0/8,172.16.0.0/12")
+if [[ -n "${OVPN_ROUTES:-}" ]]; then
+  IFS=',' read -ra ROUTES <<< "$OVPN_ROUTES"
+  for route in "${ROUTES[@]}"; do
+    # Convert CIDR to network + netmask
+    network=$(echo "$route" | cut -d'/' -f1)
+    cidr=$(echo "$route" | cut -d'/' -f2)
+    # Convert CIDR to netmask
+    case $cidr in
+      8)  netmask="255.0.0.0" ;;
+      12) netmask="255.240.0.0" ;;
+      16) netmask="255.255.0.0" ;;
+      20) netmask="255.255.240.0" ;;
+      24) netmask="255.255.255.0" ;;
+      28) netmask="255.255.255.240" ;;
+      32) netmask="255.255.255.255" ;;
+      *)  netmask="255.255.255.0" ;;
+    esac
+    echo "push \"route $network $netmask\"" >> /etc/openvpn/openvpn.conf
+  done
+fi
+
 # Password authentication setup
 if [[ "${OVPN_PASSWD_AUTH:-false}" == "true" ]]; then
   mkdir -p /etc/openvpn/scripts/

@@ -9,6 +9,8 @@ services:
       OVPN_SERVER_NET: "${OVPN_SERVER_NET:-192.168.100.0}"
       OVPN_SERVER_MASK: "${OVPN_SERVER_MASK:-255.255.255.0}"
       OVPN_PASSWD_AUTH: "${OVPN_PASSWD_AUTH:-true}"
+      OVPN_DNS: "${OVPN_DNS:-}"
+      OVPN_ROUTES: "${OVPN_ROUTES:-}"
     cap_add:
       - NET_ADMIN
     sysctls:
