@@ -35,8 +35,8 @@
         <!-- Revoke -->
         <button type="button" class="btn btn-sm btn-action-danger action-btn"
                 hx-post="/users/{{$user.Identity}}/revoke"
-                hx-target="#user-row-{{$user.Identity}}"
-                hx-swap="outerHTML"
+                hx-target="#user-table-body"
+                hx-swap="innerHTML"
                 hx-confirm="Are you sure you want to revoke {{$user.Identity}}?"
                 title="Revoke certificate">
             <i class="bi bi-shield-x"></i>
@@ -61,8 +61,8 @@
         <!-- Unrevoke -->
         <button type="button" class="btn btn-sm btn-action-success action-btn"
                 hx-post="/users/{{$user.Identity}}/unrevoke"
-                hx-target="#user-row-{{$user.Identity}}"
-                hx-swap="outerHTML"
+                hx-target="#user-table-body"
+                hx-swap="innerHTML"
                 title="Restore certificate">
             <i class="bi bi-arrow-counterclockwise"></i>
         </button>

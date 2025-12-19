@@ -857,3 +857,427 @@ func TestCalculateStats_HighConnectionCount(t *testing.T) {
 		t.Errorf("Expected ActiveConnections=150, got %d", stats.ActiveConnections)
 	}
 }
+
+// =============================================================================
+// Stats Handler Tests
+// =============================================================================
+
+func TestStatsHandler(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	now := time.Now()
+	in15Days := now.AddDate(0, 0, 15).Format("2006-01-02 15:04:05")
+	in90Days := now.AddDate(0, 0, 90).Format("2006-01-02 15:04:05")
+
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "user1", AccountStatus: "Active", Connections: 2, ExpirationDate: in90Days},
+		{Identity: "user2", AccountStatus: "Active", Connections: 1, ExpirationDate: in15Days},
+		{Identity: "user3", AccountStatus: "Revoked", Connections: 0, ExpirationDate: in90Days},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.statsHandler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	body := w.Body.String()
+
+	// Verify stats cards content
+	if !strings.Contains(body, "stat-card") {
+		t.Error("Stats response should contain stat cards")
+	}
+	if !strings.Contains(body, "Total Users") {
+		t.Error("Stats response should contain 'Total Users'")
+	}
+	if !strings.Contains(body, "Active Connections") {
+		t.Error("Stats response should contain 'Active Connections'")
+	}
+}
+
+func TestStatsCardsTemplate(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "stats_cards", map[string]interface{}{
+		"Stats": DashboardStats{
+			TotalUsers:        10,
+			ActiveConnections: 5,
+			RevokedUsers:      2,
+			ExpiringSoon:      3,
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "stat-card") {
+		t.Error("Stats cards should contain stat-card class")
+	}
+	if !strings.Contains(body, "warning") {
+		t.Error("Stats cards should have warning class when ExpiringSoon > 0")
+	}
+	if !strings.Contains(body, "within 30 days") {
+		t.Error("Stats cards should show 'within 30 days' text when ExpiringSoon > 0")
+	}
+}
+
+// =============================================================================
+// User List Handler Tests
+// =============================================================================
+
+func TestUserListHandler(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "testuser1", AccountStatus: "Active", Connections: 1, ExpirationDate: "2099-12-31 23:59:59"},
+		{Identity: "testuser2", AccountStatus: "Revoked", Connections: 0, RevocationDate: "2025-01-01 00:00:00"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.userListHandler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "testuser1") {
+		t.Error("User list should contain testuser1")
+	}
+	if !strings.Contains(body, "testuser2") {
+		t.Error("User list should contain testuser2")
+	}
+}
+
+func TestUserListHandler_HideRevoked(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "activeuser", AccountStatus: "Active", Connections: 1, ExpirationDate: "2099-12-31 23:59:59"},
+		{Identity: "revokeduser", AccountStatus: "Revoked", Connections: 0, RevocationDate: "2025-01-01 00:00:00"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	req.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "true"})
+	w := httptest.NewRecorder()
+
+	oAdmin.userListHandler(w, req)
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "activeuser") {
+		t.Error("User list should contain activeuser")
+	}
+	if strings.Contains(body, "revokeduser") {
+		t.Error("User list should NOT contain revokeduser when hideRevoked=true")
+	}
+}
+
+func TestUserListHandler_Search(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "alice", AccountStatus: "Active", ExpirationDate: "2099-12-31 23:59:59"},
+		{Identity: "bob", AccountStatus: "Active", ExpirationDate: "2099-12-31 23:59:59"},
+		{Identity: "charlie", AccountStatus: "Active", ExpirationDate: "2099-12-31 23:59:59"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/users?search=ali", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.userListHandler(w, req)
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "alice") {
+		t.Error("Search for 'ali' should return alice")
+	}
+	if strings.Contains(body, "bob") {
+		t.Error("Search for 'ali' should NOT return bob")
+	}
+	if strings.Contains(body, "charlie") {
+		t.Error("Search for 'ali' should NOT return charlie")
+	}
+}
+
+// =============================================================================
+// ExpiringSoon Field Tests
+// =============================================================================
+
+func TestUserRowsTemplate_ExpiringSoonUser(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users": []OpenvpnClient{
+			{
+				Identity:       "expiringuser",
+				AccountStatus:  "Active",
+				Connections:    0,
+				ExpirationDate: "2025-02-01 00:00:00",
+				ExpiringSoon:   true,
+			},
+		},
+		"ServerRole": "master",
+		"Modules":    []string{"core"},
+	})
+
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "expiring-soon-user") {
+		t.Error("Expiring soon user should have 'expiring-soon-user' class")
+	}
+	if !strings.Contains(body, "expiring-badge") {
+		t.Error("Expiring soon user should have expiring badge")
+	}
+}
+
+// =============================================================================
+// Dark Mode and Theme Tests
+// =============================================================================
+
+func TestDarkModeSupport(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.indexPageHandler(w, req)
+
+	body := w.Body.String()
+
+	// Verify theme toggle button exists
+	if !strings.Contains(body, "theme-toggle") {
+		t.Error("Page should contain theme toggle button")
+	}
+	if !strings.Contains(body, "bi-sun-fill") {
+		t.Error("Page should contain sun icon for light mode")
+	}
+	if !strings.Contains(body, "bi-moon-fill") {
+		t.Error("Page should contain moon icon for dark mode")
+	}
+	// Verify data-theme attribute
+	if !strings.Contains(body, "data-theme") {
+		t.Error("HTML should have data-theme attribute")
+	}
+}
+
+// =============================================================================
+// Keyboard Shortcuts Tests
+// =============================================================================
+
+func TestKeyboardShortcutsModal(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.indexPageHandler(w, req)
+
+	body := w.Body.String()
+
+	// Verify shortcuts modal exists
+	if !strings.Contains(body, "shortcuts-modal") {
+		t.Error("Page should contain keyboard shortcuts modal")
+	}
+	if !strings.Contains(body, "Keyboard Shortcuts") {
+		t.Error("Page should contain 'Keyboard Shortcuts' text")
+	}
+	// Verify some shortcuts are documented
+	if !strings.Contains(body, "<kbd>") {
+		t.Error("Page should contain kbd elements for shortcuts")
+	}
+}
+
+// =============================================================================
+// Bulk Actions Tests
+// =============================================================================
+
+func TestBulkActionsBar(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.role = "master"
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.indexPageHandler(w, req)
+
+	body := w.Body.String()
+
+	// Verify bulk actions bar exists for master
+	if !strings.Contains(body, "bulk-actions-bar") {
+		t.Error("Master should have bulk actions bar")
+	}
+	if !strings.Contains(body, "Revoke Selected") {
+		t.Error("Bulk actions should have 'Revoke Selected' button")
+	}
+	if !strings.Contains(body, "select-all-checkbox") {
+		t.Error("Master should have select all checkbox")
+	}
+}
+
+func TestBulkActionsBar_SlaveHidden(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.role = "slave"
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.indexPageHandler(w, req)
+
+	body := w.Body.String()
+
+	// Slave should NOT have bulk actions div (check for the actual div, not comment)
+	if strings.Contains(body, `id="bulk-actions-bar"`) {
+		t.Error("Slave should NOT have bulk actions bar")
+	}
+	// Slave should NOT have Revoke Selected button
+	if strings.Contains(body, "Revoke Selected") {
+		t.Error("Slave should NOT have 'Revoke Selected' button")
+	}
+}
+
+func TestUserRowsTemplate_CheckboxForMaster(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users": []OpenvpnClient{
+			{Identity: "testuser", AccountStatus: "Active", ExpirationDate: "2099-12-31 23:59:59"},
+		},
+		"ServerRole": "master",
+		"Modules":    []string{"core"},
+	})
+
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "user-checkbox") {
+		t.Error("Master role should have user checkboxes for selection")
+	}
+}
+
+func TestUserRowsTemplate_NoCheckboxForSlave(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users": []OpenvpnClient{
+			{Identity: "testuser", AccountStatus: "Active", ExpirationDate: "2099-12-31 23:59:59"},
+		},
+		"ServerRole": "slave",
+		"Modules":    []string{"core"},
+	})
+
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	body := w.Body.String()
+
+	if strings.Contains(body, "user-checkbox") {
+		t.Error("Slave role should NOT have user checkboxes")
+	}
+}
+
+// =============================================================================
+// Live Status Indicator Tests
+// =============================================================================
+
+func TestLiveStatusIndicator(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	oAdmin.indexPageHandler(w, req)
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "live-indicator") {
+		t.Error("Page should contain live status indicator")
+	}
+	if !strings.Contains(body, "live-dot") {
+		t.Error("Page should contain live dot animation element")
+	}
+}
+
+// =============================================================================
+// HTMX Attributes Tests
+// =============================================================================
+
+func TestHTMXAttributesInUserRows(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users": []OpenvpnClient{
+			{Identity: "testuser", AccountStatus: "Active", ExpirationDate: "2099-12-31 23:59:59"},
+		},
+		"ServerRole": "master",
+		"Modules":    []string{"core"},
+	})
+
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	body := w.Body.String()
+
+	// Verify correct HTMX targets
+	if !strings.Contains(body, `hx-target="#user-table-body"`) {
+		t.Error("Revoke button should target #user-table-body")
+	}
+	if !strings.Contains(body, `hx-swap="innerHTML"`) {
+		t.Error("Actions should use innerHTML swap")
+	}
+}
+
+func TestHTMXAttributesInModals(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	// Test create modal
+	w := httptest.NewRecorder()
+	oAdmin.modalCreateHandler(w, httptest.NewRequest(http.MethodGet, "/modal/create", nil))
+	body := w.Body.String()
+
+	if !strings.Contains(body, `hx-post="/users"`) {
+		t.Error("Create modal should POST to /users")
+	}
+	if !strings.Contains(body, `hx-target="#user-table-body"`) {
+		t.Error("Create modal should target #user-table-body")
+	}
+}
+
+// =============================================================================
+// Form Validation Tests
+// =============================================================================
+
+func TestUsernamePatternInCreateModal(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	oAdmin.modalCreateHandler(w, httptest.NewRequest(http.MethodGet, "/modal/create", nil))
+	body := w.Body.String()
+
+	// Verify the fixed regex pattern (hyphen at start of character class)
+	if !strings.Contains(body, `pattern="^[-a-zA-Z0-9_.@]+$"`) {
+		t.Error("Username field should have correct regex pattern with hyphen at start")
+	}
+}

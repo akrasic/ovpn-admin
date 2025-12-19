@@ -883,8 +883,14 @@ func main() {
 		}
 	})
 
-	// User list (HTMX partial)
-	http.HandleFunc(*listenBaseUrl+"users", ovpnAdmin.userListHandler)
+	// User list (HTMX partial) and create user
+	http.HandleFunc(*listenBaseUrl+"users", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			ovpnAdmin.userCreateHandler(w, r)
+			return
+		}
+		ovpnAdmin.userListHandler(w, r)
+	})
 
 	// Stats (HTMX partial for dashboard refresh)
 	http.HandleFunc(*listenBaseUrl+"stats", ovpnAdmin.statsHandler)
