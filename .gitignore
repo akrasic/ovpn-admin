@@ -1,5 +1,8 @@
 bin/
 
+# Environment file (use .env.example as template)
+.env
+
 easyrsa
 easyrsa_master
 easyrsa_slave

@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   openvpn:
     build:
@@ -8,9 +6,9 @@ services:
     image: openvpn:local
     command: /etc/openvpn/setup/configure.sh
     environment:
-      OVPN_SERVER_NET: "192.168.100.0"
-      OVPN_SERVER_MASK: "255.255.255.0"
-      OVPN_PASSWD_AUTH: "true"
+      OVPN_SERVER_NET: "${OVPN_SERVER_NET:-192.168.100.0}"
+      OVPN_SERVER_MASK: "${OVPN_SERVER_MASK:-255.255.255.0}"
+      OVPN_PASSWD_AUTH: "${OVPN_PASSWD_AUTH:-true}"
     cap_add:
       - NET_ADMIN
     sysctls:
@@ -18,11 +16,12 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
-      - 7777:1194 # for openvpn
-      - 8080:8080 # for ovpn-admin because of network_mode
+      - "${OVPN_PORT:-7777}:1194"
+      - "${ADMIN_PORT:-8080}:8080"
     volumes:
-      - ./easyrsa_master:/etc/openvpn/easyrsa
-      - ./ccd_master:/etc/openvpn/ccd
+      - ${EASYRSA_PATH:-./easyrsa_master}:/etc/openvpn/easyrsa
+      - ${CCD_PATH:-./ccd_master}:/etc/openvpn/ccd
+
   ovpn-admin:
     build:
       context: .
@@ -30,18 +29,18 @@ services:
     image: ovpn-admin:local
     command: /app/ovpn-admin
     environment:
-      OVPN_DEBUG: "true"
-      OVPN_VERBOSE: "true"
-      OVPN_NETWORK: "192.168.100.0/24"
-      OVPN_CCD: "true"
+      OVPN_DEBUG: "${OVPN_DEBUG:-false}"
+      OVPN_VERBOSE: "${OVPN_VERBOSE:-false}"
+      OVPN_NETWORK: "${OVPN_SERVER_NET:-192.168.100.0}/${OVPN_SERVER_CIDR:-24}"
+      OVPN_CCD: "${OVPN_CCD:-true}"
       OVPN_CCD_PATH: "/mnt/ccd"
       EASYRSA_PATH: "/mnt/easyrsa"
-      OVPN_SERVER: "127.0.0.1:7777:tcp"
+      OVPN_SERVER: "${OVPN_MGMT_SERVER:-127.0.0.1:7777:tcp}"
       OVPN_INDEX_PATH: "/mnt/easyrsa/pki/index.txt"
-      OVPN_AUTH: "true"
+      OVPN_AUTH: "${OVPN_PASSWD_AUTH:-true}"
       OVPN_AUTH_DB_PATH: "/mnt/easyrsa/pki/users.db"
-      LOG_LEVEL: "debug"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
     network_mode: service:openvpn
     volumes:
-      - ./easyrsa_master:/mnt/easyrsa
-      - ./ccd_master:/mnt/ccd
+      - ${EASYRSA_PATH:-./easyrsa_master}:/mnt/easyrsa
+      - ${CCD_PATH:-./ccd_master}:/mnt/ccd
