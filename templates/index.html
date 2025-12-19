@@ -136,24 +136,6 @@
     </div>
 </div>
 
-{{if eq (len .Users) 0}}
-<div class="empty-state" id="empty-state">
-    <div class="empty-state-icon">
-        <i class="bi bi-person-plus"></i>
-    </div>
-    <h3>No users yet</h3>
-    <p>Get started by creating your first VPN user</p>
-    {{if eq .ServerRole "master"}}
-    <button type="button" class="btn btn-primary btn-lg"
-            hx-get="/modal/create"
-            hx-target="#modal-container">
-        <i class="bi bi-plus-lg"></i>
-        Add Your First User
-    </button>
-    {{end}}
-</div>
-{{end}}
-
 <!-- Bulk Actions Bar -->
 {{if eq .ServerRole "master"}}
 <div class="bulk-actions-bar" id="bulk-actions-bar">

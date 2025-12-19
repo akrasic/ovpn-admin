@@ -3,54 +3,60 @@
 {{$role := .ServerRole}}
 {{$modules := .Modules}}
 
+<div class="action-buttons">
 {{if eq $user.AccountStatus "Active"}}
     <!-- Download config - available for all roles -->
-    <button type="button" class="btn btn-sm btn-action-info action-btn"
+    <button type="button" class="btn btn-sm btn-action-info"
             onclick="downloadConfig('{{$user.Identity}}')"
             title="Download OpenVPN config">
         <i class="bi bi-download"></i>
+        <span class="btn-text">Config</span>
     </button>
 
     {{if eq $role "master"}}
         <!-- Change password - only if passwdAuth module enabled -->
         {{if hasModule $modules "passwdAuth"}}
-        <button type="button" class="btn btn-sm btn-action-warning action-btn"
+        <button type="button" class="btn btn-sm btn-action-warning"
                 hx-get="/modal/password/{{$user.Identity}}"
                 hx-target="#modal-container"
                 title="Change password">
             <i class="bi bi-key"></i>
+            <span class="btn-text">Password</span>
         </button>
         {{end}}
 
         <!-- Edit routes - only if ccd module enabled -->
         {{if hasModule $modules "ccd"}}
-        <button type="button" class="btn btn-sm btn-action-info action-btn"
+        <button type="button" class="btn btn-sm btn-action-info"
                 hx-get="/modal/ccd/{{$user.Identity}}"
                 hx-target="#modal-container"
                 title="Edit routes">
             <i class="bi bi-diagram-3"></i>
+            <span class="btn-text">Routes</span>
         </button>
         {{end}}
 
         <!-- Revoke -->
-        <button type="button" class="btn btn-sm btn-action-danger action-btn"
+        <button type="button" class="btn btn-sm btn-action-danger"
                 hx-post="/users/{{$user.Identity}}/revoke"
                 hx-target="#user-table-body"
                 hx-swap="innerHTML"
                 hx-confirm="Are you sure you want to revoke {{$user.Identity}}?"
                 title="Revoke certificate">
             <i class="bi bi-shield-x"></i>
+            <span class="btn-text">Revoke</span>
         </button>
     {{end}}
 
     {{if eq $role "slave"}}
         <!-- Show routes - only if ccd module enabled -->
         {{if hasModule $modules "ccd"}}
-        <button type="button" class="btn btn-sm btn-action-info action-btn"
+        <button type="button" class="btn btn-sm btn-action-info"
                 hx-get="/modal/ccd/{{$user.Identity}}"
                 hx-target="#modal-container"
                 title="View routes">
             <i class="bi bi-diagram-3"></i>
+            <span class="btn-text">Routes</span>
         </button>
         {{end}}
     {{end}}
@@ -59,28 +65,31 @@
 {{if eq $user.AccountStatus "Revoked"}}
     {{if eq $role "master"}}
         <!-- Unrevoke -->
-        <button type="button" class="btn btn-sm btn-action-success action-btn"
+        <button type="button" class="btn btn-sm btn-action-success"
                 hx-post="/users/{{$user.Identity}}/unrevoke"
                 hx-target="#user-table-body"
                 hx-swap="innerHTML"
                 title="Restore certificate">
             <i class="bi bi-arrow-counterclockwise"></i>
+            <span class="btn-text">Restore</span>
         </button>
 
         <!-- Rotate -->
-        <button type="button" class="btn btn-sm btn-action-warning action-btn"
+        <button type="button" class="btn btn-sm btn-action-warning"
                 hx-get="/modal/rotate/{{$user.Identity}}"
                 hx-target="#modal-container"
                 title="Rotate certificate">
             <i class="bi bi-arrow-repeat"></i>
+            <span class="btn-text">Rotate</span>
         </button>
 
         <!-- Delete -->
-        <button type="button" class="btn btn-sm btn-action-danger action-btn"
+        <button type="button" class="btn btn-sm btn-action-danger"
                 hx-get="/modal/delete/{{$user.Identity}}"
                 hx-target="#modal-container"
                 title="Delete user">
             <i class="bi bi-trash"></i>
+            <span class="btn-text">Delete</span>
         </button>
     {{end}}
 {{end}}
@@ -88,20 +97,23 @@
 {{if eq $user.AccountStatus "Expired"}}
     {{if eq $role "master"}}
         <!-- Rotate -->
-        <button type="button" class="btn btn-sm btn-action-warning action-btn"
+        <button type="button" class="btn btn-sm btn-action-warning"
                 hx-get="/modal/rotate/{{$user.Identity}}"
                 hx-target="#modal-container"
                 title="Rotate certificate">
             <i class="bi bi-arrow-repeat"></i>
+            <span class="btn-text">Rotate</span>
         </button>
 
         <!-- Delete -->
-        <button type="button" class="btn btn-sm btn-action-danger action-btn"
+        <button type="button" class="btn btn-sm btn-action-danger"
                 hx-get="/modal/delete/{{$user.Identity}}"
                 hx-target="#modal-container"
                 title="Delete user">
             <i class="bi bi-trash"></i>
+            <span class="btn-text">Delete</span>
         </button>
     {{end}}
 {{end}}
+</div>
 {{end}}
