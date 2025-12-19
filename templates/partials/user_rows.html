@@ -1,0 +1,28 @@
+{{define "user_rows"}}
+{{range $index, $user := .Users}}
+<tr id="user-row-{{$user.Identity}}" class="{{if eq $user.ConnectionStatus "Connected"}}connected-user{{end}}{{if eq $user.AccountStatus "Revoked"}} revoked-user{{end}}{{if eq $user.AccountStatus "Expired"}} expired-user{{end}}">
+    <td>{{add $index 1}}</td>
+    <td>{{$user.Identity}}</td>
+    <td>{{$user.AccountStatus}}</td>
+    <td>{{$user.Connections}}</td>
+    <td>{{$user.ExpirationDate}}</td>
+    <td>{{if $user.RevocationDate}}{{$user.RevocationDate}}{{end}}</td>
+    <td class="text-end">
+        {{template "user_actions" dict "User" $user "ServerRole" $.ServerRole "Modules" $.Modules}}
+    </td>
+</tr>
+{{else}}
+<tr>
+    <td colspan="7" class="text-center py-4">
+        <h5>No users found.</h5>
+        {{if eq $.ServerRole "master"}}
+        <button type="button" class="btn btn-success btn-square mt-2"
+                hx-get="/modal/create"
+                hx-target="#modal-container">
+            Add user
+        </button>
+        {{end}}
+    </td>
+</tr>
+{{end}}
+{{end}}

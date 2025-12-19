@@ -1,0 +1,69 @@
+{{define "content"}}
+<div class="table-actions">
+    {{if eq .ServerRole "master"}}
+    <button type="button" class="btn btn-sm btn-success btn-square"
+            hx-get="/modal/create"
+            hx-target="#modal-container">
+        Add user
+    </button>
+    {{end}}
+
+    {{if eq .ServerRole "slave"}}
+    <span class="badge bg-info slave-badge">Slave - last sync: {{.LastSync}}</span>
+    {{end}}
+
+    <button type="button" class="btn btn-sm btn-secondary btn-square"
+            hx-get="/users"
+            hx-target="#user-table-body"
+            hx-swap="innerHTML"
+            onclick="toggleHideRevoked()">
+        {{if .HideRevoked}}Show revoked{{else}}Hide revoked{{end}}
+    </button>
+
+    <input type="text"
+           class="form-control form-control-sm search-input"
+           placeholder="Search users..."
+           name="search"
+           hx-get="/users"
+           hx-target="#user-table-body"
+           hx-swap="innerHTML"
+           hx-trigger="keyup changed delay:300ms"
+           hx-include="[name='search']">
+
+    <span class="htmx-indicator">
+        <span class="spinner-border spinner-border-sm" role="status"></span>
+    </span>
+</div>
+
+<div class="table-responsive">
+    <table class="table table-bordered table-hover" id="user-table">
+        <thead class="table-light">
+            <tr>
+                <th scope="col">#</th>
+                <th scope="col">Name</th>
+                <th scope="col">Account Status</th>
+                <th scope="col">Active Connections</th>
+                <th scope="col">Expiration Date</th>
+                <th scope="col">Revocation Date</th>
+                <th scope="col" class="text-end">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="user-table-body" hx-get="/users" hx-trigger="load" hx-swap="innerHTML">
+            <!-- User rows loaded via HTMX -->
+        </tbody>
+    </table>
+</div>
+
+{{if eq (len .Users) 0}}
+<div class="text-center py-4" id="empty-state">
+    <h4>No users have been created yet.</h4>
+    {{if eq .ServerRole "master"}}
+    <button type="button" class="btn btn-success btn-square mt-2"
+            hx-get="/modal/create"
+            hx-target="#modal-container">
+        Add user
+    </button>
+    {{end}}
+</div>
+{{end}}
+{{end}}

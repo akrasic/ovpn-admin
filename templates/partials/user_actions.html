@@ -1,0 +1,97 @@
+{{define "user_actions"}}
+{{$user := .User}}
+{{$role := .ServerRole}}
+{{$modules := .Modules}}
+
+{{if eq $user.AccountStatus "Active"}}
+    <!-- Download config - available for all roles -->
+    <button type="button" class="btn btn-sm btn-info btn-square action-btn"
+            onclick="downloadConfig('{{$user.Identity}}')">
+        Download config
+    </button>
+
+    {{if eq $role "master"}}
+        <!-- Change password - only if passwdAuth module enabled -->
+        {{if hasModule $modules "passwdAuth"}}
+        <button type="button" class="btn btn-sm btn-warning btn-square action-btn"
+                hx-get="/modal/password/{{$user.Identity}}"
+                hx-target="#modal-container">
+            Change password
+        </button>
+        {{end}}
+
+        <!-- Edit routes - only if ccd module enabled -->
+        {{if hasModule $modules "ccd"}}
+        <button type="button" class="btn btn-sm btn-primary btn-square action-btn"
+                hx-get="/modal/ccd/{{$user.Identity}}"
+                hx-target="#modal-container">
+            Edit routes
+        </button>
+        {{end}}
+
+        <!-- Revoke -->
+        <button type="button" class="btn btn-sm btn-warning btn-square action-btn"
+                hx-post="/users/{{$user.Identity}}/revoke"
+                hx-target="#user-row-{{$user.Identity}}"
+                hx-swap="outerHTML"
+                hx-confirm="Are you sure you want to revoke {{$user.Identity}}?">
+            Revoke
+        </button>
+    {{end}}
+
+    {{if eq $role "slave"}}
+        <!-- Show routes - only if ccd module enabled -->
+        {{if hasModule $modules "ccd"}}
+        <button type="button" class="btn btn-sm btn-primary btn-square action-btn"
+                hx-get="/modal/ccd/{{$user.Identity}}"
+                hx-target="#modal-container">
+            Show routes
+        </button>
+        {{end}}
+    {{end}}
+{{end}}
+
+{{if eq $user.AccountStatus "Revoked"}}
+    {{if eq $role "master"}}
+        <!-- Unrevoke -->
+        <button type="button" class="btn btn-sm btn-primary btn-square action-btn"
+                hx-post="/users/{{$user.Identity}}/unrevoke"
+                hx-target="#user-row-{{$user.Identity}}"
+                hx-swap="outerHTML">
+            Unrevoke
+        </button>
+
+        <!-- Rotate -->
+        <button type="button" class="btn btn-sm btn-warning btn-square action-btn"
+                hx-get="/modal/rotate/{{$user.Identity}}"
+                hx-target="#modal-container">
+            Rotate
+        </button>
+
+        <!-- Delete -->
+        <button type="button" class="btn btn-sm btn-danger btn-square action-btn"
+                hx-get="/modal/delete/{{$user.Identity}}"
+                hx-target="#modal-container">
+            Delete
+        </button>
+    {{end}}
+{{end}}
+
+{{if eq $user.AccountStatus "Expired"}}
+    {{if eq $role "master"}}
+        <!-- Rotate -->
+        <button type="button" class="btn btn-sm btn-warning btn-square action-btn"
+                hx-get="/modal/rotate/{{$user.Identity}}"
+                hx-target="#modal-container">
+            Rotate
+        </button>
+
+        <!-- Delete -->
+        <button type="button" class="btn btn-sm btn-danger btn-square action-btn"
+                hx-get="/modal/delete/{{$user.Identity}}"
+                hx-target="#modal-container">
+            Delete
+        </button>
+    {{end}}
+{{end}}
+{{end}}

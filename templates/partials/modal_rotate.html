@@ -1,0 +1,40 @@
+{{define "modal_rotate"}}
+<div class="modal-backdrop-custom show" onclick="if(event.target === this) closeModal()">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Rotate certificates for: <strong>{{.Username}}</strong></h5>
+                <button type="button" class="btn-close" onclick="closeModal()"></button>
+            </div>
+            <form hx-post="/users/{{.Username}}/rotate"
+                  hx-target="#user-table-body"
+                  hx-swap="innerHTML"
+                  hx-on::after-request="if(event.detail.successful) closeModal()">
+                <div class="modal-body">
+                    <p class="text-muted">This will generate new certificates for this user. The old certificates will be revoked.</p>
+                    {{if hasModule .Modules "passwdAuth"}}
+                    <div class="mb-3">
+                        <label for="password" class="form-label">New Password</label>
+                        <input type="password"
+                               class="form-control"
+                               id="password"
+                               name="password"
+                               placeholder="New password (min 6 characters)"
+                               minlength="6"
+                               required>
+                    </div>
+                    {{end}}
+                    <div id="rotate-error" class="alert alert-danger d-none"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-square" onclick="closeModal()">Close</button>
+                    <button type="submit" class="btn btn-danger btn-square">
+                        <span class="htmx-indicator spinner-border spinner-border-sm me-1"></span>
+                        Rotate
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{{end}}

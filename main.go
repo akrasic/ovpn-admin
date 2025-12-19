@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"embed"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"html/template"
+	"io/fs"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -17,7 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
+	texttemplate "text/template"
 	"time"
 	"unicode/utf8"
 
@@ -26,13 +29,18 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/gobuffalo/packr/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
 	"gopkg.in/alecthomas/kingpin.v2"
 )
+
+//go:embed templates/*
+var templatesFS embed.FS
+
+//go:embed static/*
+var staticFS embed.FS
 
 const (
 	usernameRegexp         = `^([a-zA-Z0-9_.\-@])+$`
@@ -193,10 +201,10 @@ type OvpnAdmin struct {
 	activeClients          []clientStatus
 	promRegistry           *prometheus.Registry
 	mgmtInterfaces         map[string]string
-	templates              *packr.Box
 	modules                []string
 	mgmtStatusTimeFormat   string
 	createUserMutex        *sync.Mutex
+	htmlTemplates          *template.Template
 }
 
 type OpenvpnServer struct {
@@ -269,8 +277,47 @@ func (oAdmin *OvpnAdmin) userListHandler(w http.ResponseWriter, r *http.Request)
 		oAdmin.clients = oAdmin.usersList()
 	}
 
-	usersList, _ := json.Marshal(oAdmin.clients)
-	fmt.Fprintf(w, "%s", usersList)
+	// Check if hide revoked filter is set
+	hideRevoked := false
+	if cookie, err := r.Cookie("hideRevoked"); err == nil {
+		hideRevoked = cookie.Value == "true"
+	}
+
+	// Filter users if hideRevoked is set
+	users := oAdmin.clients
+	if hideRevoked {
+		var filtered []OpenvpnClient
+		for _, u := range users {
+			if u.AccountStatus == "Active" {
+				filtered = append(filtered, u)
+			}
+		}
+		users = filtered
+	}
+
+	// Search filter
+	search := r.URL.Query().Get("search")
+	if search != "" {
+		var filtered []OpenvpnClient
+		searchLower := strings.ToLower(search)
+		for _, u := range users {
+			if strings.Contains(strings.ToLower(u.Identity), searchLower) {
+				filtered = append(filtered, u)
+			}
+		}
+		users = filtered
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users":      users,
+		"ServerRole": oAdmin.role,
+		"Modules":    oAdmin.modules,
+	})
+	if err != nil {
+		log.Errorf("Error rendering user_rows template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (oAdmin *OvpnAdmin) userStatisticHandler(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +330,7 @@ func (oAdmin *OvpnAdmin) userStatisticHandler(w http.ResponseWriter, r *http.Req
 func (oAdmin *OvpnAdmin) userCreateHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	if oAdmin.role == "slave" {
-		http.Error(w, `{"status":"error"}`, http.StatusLocked)
+		http.Error(w, "Operation not allowed in slave mode", http.StatusLocked)
 		return
 	}
 	_ = r.ParseForm()
@@ -291,8 +338,8 @@ func (oAdmin *OvpnAdmin) userCreateHandler(w http.ResponseWriter, r *http.Reques
 
 	if userCreated {
 		oAdmin.clients = oAdmin.usersList()
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, userCreateStatus)
+		w.Header().Set("HX-Trigger", `{"showToast": {"message": "`+userCreateStatus+`", "type": "success"}}`)
+		oAdmin.renderUserRows(w, r)
 		return
 	} else {
 		http.Error(w, userCreateStatus, http.StatusUnprocessableEntity)
@@ -301,64 +348,111 @@ func (oAdmin *OvpnAdmin) userCreateHandler(w http.ResponseWriter, r *http.Reques
 func (oAdmin *OvpnAdmin) userRotateHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	if oAdmin.role == "slave" {
-		http.Error(w, `{"status":"error"}`, http.StatusLocked)
+		http.Error(w, "Operation not allowed in slave mode", http.StatusLocked)
 		return
 	}
 	_ = r.ParseForm()
-	err, msg := oAdmin.userRotate(r.FormValue("username"), r.FormValue("password"))
+	username := oAdmin.extractUsername(r)
+	err, _ := oAdmin.userRotate(username, r.FormValue("password"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	} else {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, msg)
+		w.Header().Set("HX-Trigger", `{"showToast": {"message": "Certificates rotated for `+username+`", "type": "success"}}`)
+		oAdmin.renderUserRows(w, r)
 	}
 }
 
 func (oAdmin *OvpnAdmin) userDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	if oAdmin.role == "slave" {
-		http.Error(w, `{"status":"error"}`, http.StatusLocked)
+		http.Error(w, "Operation not allowed in slave mode", http.StatusLocked)
 		return
 	}
 	_ = r.ParseForm()
-	err, msg := oAdmin.userDelete(r.FormValue("username"))
+	username := oAdmin.extractUsername(r)
+	err, _ := oAdmin.userDelete(username)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	} else {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, msg)
+		w.Header().Set("HX-Trigger", `{"showToast": {"message": "User `+username+` deleted", "type": "success"}}`)
+		oAdmin.renderUserRows(w, r)
 	}
 }
 
 func (oAdmin *OvpnAdmin) userRevokeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	if oAdmin.role == "slave" {
-		http.Error(w, `{"status":"error"}`, http.StatusLocked)
+		http.Error(w, "Operation not allowed in slave mode", http.StatusLocked)
 		return
 	}
 	_ = r.ParseForm()
-	err, msg := oAdmin.userRevoke(r.FormValue("username"))
+	username := oAdmin.extractUsername(r)
+	err, _ := oAdmin.userRevoke(username)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	} else {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, msg)
+		w.Header().Set("HX-Trigger", `{"showToast": {"message": "User `+username+` revoked", "type": "warn"}}`)
+		oAdmin.renderUserRows(w, r)
 	}
 }
 
 func (oAdmin *OvpnAdmin) userUnrevokeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	if oAdmin.role == "slave" {
-		http.Error(w, `{"status":"error"}`, http.StatusLocked)
+		http.Error(w, "Operation not allowed in slave mode", http.StatusLocked)
 		return
 	}
 	_ = r.ParseForm()
-	err, msg := oAdmin.userUnrevoke(r.FormValue("username"))
+	username := oAdmin.extractUsername(r)
+	err, _ := oAdmin.userUnrevoke(username)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	} else {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, msg)
+		w.Header().Set("HX-Trigger", `{"showToast": {"message": "User `+username+` unrevoked", "type": "success"}}`)
+		oAdmin.renderUserRows(w, r)
+	}
+}
+
+// Helper function to extract username from URL path or form
+func (oAdmin *OvpnAdmin) extractUsername(r *http.Request) string {
+	// Try to get from URL path first (e.g., /users/john/revoke)
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "users" {
+		return parts[1]
+	}
+	// Fall back to form value
+	return r.FormValue("username")
+}
+
+// Helper function to render user rows
+func (oAdmin *OvpnAdmin) renderUserRows(w http.ResponseWriter, r *http.Request) {
+	oAdmin.clients = oAdmin.usersList()
+
+	hideRevoked := false
+	if cookie, err := r.Cookie("hideRevoked"); err == nil {
+		hideRevoked = cookie.Value == "true"
+	}
+
+	users := oAdmin.clients
+	if hideRevoked {
+		var filtered []OpenvpnClient
+		for _, u := range users {
+			if u.AccountStatus == "Active" {
+				filtered = append(filtered, u)
+			}
+		}
+		users = filtered
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users":      users,
+		"ServerRole": oAdmin.role,
+		"Modules":    oAdmin.modules,
+	})
+	if err != nil {
+		log.Errorf("Error rendering user_rows template: %v", err)
 	}
 }
 
@@ -366,25 +460,25 @@ func (oAdmin *OvpnAdmin) userChangePasswordHandler(w http.ResponseWriter, r *htt
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	_ = r.ParseForm()
 	if *authByPassword {
-		err, msg := oAdmin.userChangePassword(r.FormValue("username"), r.FormValue("password"))
+		username := oAdmin.extractUsername(r)
+		err, msg := oAdmin.userChangePassword(username, r.FormValue("password"))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, `{"status":"error", "message": "%s"}`, msg)
-
+			http.Error(w, msg, http.StatusInternalServerError)
 		} else {
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, `{"status":"ok", "message": "%s"}`, msg)
+			w.Header().Set("HX-Trigger", `{"showToast": {"message": "Password changed for `+username+`", "type": "success"}}`)
+			oAdmin.renderUserRows(w, r)
 		}
 	} else {
-		http.Error(w, `{"status":"error"}`, http.StatusNotImplemented)
+		http.Error(w, "Password authentication not enabled", http.StatusNotImplemented)
 	}
-
 }
 
 func (oAdmin *OvpnAdmin) userShowConfigHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	_ = r.ParseForm()
-	fmt.Fprintf(w, "%s", oAdmin.renderClientConfig(r.FormValue("username")))
+	username := oAdmin.extractUsername(r)
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprintf(w, "%s", oAdmin.renderClientConfig(username))
 }
 
 func (oAdmin *OvpnAdmin) userDisconnectHandler(w http.ResponseWriter, r *http.Request) {
@@ -397,35 +491,72 @@ func (oAdmin *OvpnAdmin) userDisconnectHandler(w http.ResponseWriter, r *http.Re
 func (oAdmin *OvpnAdmin) userShowCcdHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	_ = r.ParseForm()
-	ccd, _ := json.Marshal(oAdmin.getCcd(r.FormValue("username")))
-	fmt.Fprintf(w, "%s", ccd)
+	username := oAdmin.extractUsername(r)
+	ccd := oAdmin.getCcd(username)
+	ccd.User = username
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "modal_ccd", map[string]interface{}{
+		"Ccd":        ccd,
+		"ServerRole": oAdmin.role,
+		"Modules":    oAdmin.modules,
+	})
+	if err != nil {
+		log.Errorf("Error rendering modal_ccd template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (oAdmin *OvpnAdmin) userApplyCcdHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	if oAdmin.role == "slave" {
-		http.Error(w, `{"status":"error"}`, http.StatusLocked)
+		http.Error(w, "Operation not allowed in slave mode", http.StatusLocked)
 		return
 	}
-	var ccd Ccd
-	if r.Body == nil {
-		http.Error(w, "Please send a request body", http.StatusBadRequest)
-		return
+	_ = r.ParseForm()
+
+	username := oAdmin.extractUsername(r)
+
+	// Parse form data into Ccd struct
+	ccd := Ccd{
+		User:          username,
+		ClientAddress: r.FormValue("clientAddress"),
+		CustomRoutes:  []ccdRoute{},
 	}
 
-	err := json.NewDecoder(r.Body).Decode(&ccd)
-	if err != nil {
-		log.Errorln(err)
+	// Parse routes from form
+	for i := 0; ; i++ {
+		address := r.FormValue(fmt.Sprintf("routes[%d].address", i))
+		if address == "" {
+			break
+		}
+		mask := r.FormValue(fmt.Sprintf("routes[%d].mask", i))
+		description := r.FormValue(fmt.Sprintf("routes[%d].description", i))
+		ccd.CustomRoutes = append(ccd.CustomRoutes, ccdRoute{
+			Address:     address,
+			Mask:        mask,
+			Description: description,
+		})
 	}
 
 	ccdApplied, applyStatus := oAdmin.modifyCcd(ccd)
 
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if ccdApplied {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, applyStatus)
-		return
+		w.Header().Set("HX-Trigger", `{"showToast": {"message": "Routes updated for `+username+`", "type": "success"}}`)
+		err := oAdmin.htmlTemplates.ExecuteTemplate(w, "alert_success", map[string]interface{}{
+			"Message": applyStatus,
+		})
+		if err != nil {
+			log.Errorf("Error rendering alert template: %v", err)
+		}
 	} else {
-		http.Error(w, applyStatus, http.StatusUnprocessableEntity)
+		err := oAdmin.htmlTemplates.ExecuteTemplate(w, "alert_error", map[string]interface{}{
+			"Message": applyStatus,
+		})
+		if err != nil {
+			log.Errorf("Error rendering alert template: %v", err)
+		}
 	}
 }
 
@@ -436,6 +567,83 @@ func (oAdmin *OvpnAdmin) serverSettingsHandler(w http.ResponseWriter, r *http.Re
 		log.Errorln(enabledModulesErr)
 	}
 	fmt.Fprintf(w, `{"status":"ok", "serverRole": "%s", "modules": %s }`, oAdmin.role, string(enabledModules))
+}
+
+// Index page handler - renders the main page
+func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+
+	hideRevoked := false
+	if cookie, err := r.Cookie("hideRevoked"); err == nil {
+		hideRevoked = cookie.Value == "true"
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "base", map[string]interface{}{
+		"Users":      oAdmin.clients,
+		"ServerRole": oAdmin.role,
+		"Modules":    oAdmin.modules,
+		"HideRevoked": hideRevoked,
+		"LastSync":   oAdmin.lastSuccessfulSyncTime,
+	})
+	if err != nil {
+		log.Errorf("Error rendering index template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// Modal handlers
+func (oAdmin *OvpnAdmin) modalCreateHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "modal_create", map[string]interface{}{
+		"Modules": oAdmin.modules,
+	})
+	if err != nil {
+		log.Errorf("Error rendering modal_create template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (oAdmin *OvpnAdmin) modalPasswordHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+	username := oAdmin.extractUsername(r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "modal_password", map[string]interface{}{
+		"Username": username,
+		"Modules":  oAdmin.modules,
+	})
+	if err != nil {
+		log.Errorf("Error rendering modal_password template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (oAdmin *OvpnAdmin) modalRotateHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+	username := oAdmin.extractUsername(r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "modal_rotate", map[string]interface{}{
+		"Username": username,
+		"Modules":  oAdmin.modules,
+	})
+	if err != nil {
+		log.Errorf("Error rendering modal_rotate template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (oAdmin *OvpnAdmin) modalDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+	username := oAdmin.extractUsername(r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "modal_delete", map[string]interface{}{
+		"Username": username,
+	})
+	if err != nil {
+		log.Errorf("Error rendering modal_delete template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (oAdmin *OvpnAdmin) lastSyncTimeHandler(w http.ResponseWriter, r *http.Request) {
@@ -566,19 +774,121 @@ func main() {
 		go ovpnAdmin.syncWithMaster()
 	}
 
-	ovpnAdmin.templates = packr.New("template", "./templates")
+	// Load HTML templates with helper functions
+	funcMap := template.FuncMap{
+		"hasModule": func(modules []string, module string) bool {
+			for _, m := range modules {
+				if m == module {
+					return true
+				}
+			}
+			return false
+		},
+		"add": func(a, b int) int {
+			return a + b
+		},
+		"dict": func(values ...interface{}) map[string]interface{} {
+			dict := make(map[string]interface{})
+			for i := 0; i < len(values); i += 2 {
+				key, _ := values[i].(string)
+				dict[key] = values[i+1]
+			}
+			return dict
+		},
+	}
 
-	staticBox := packr.New("static", "./frontend/static")
-	static := CacheControlWrapper(http.FileServer(staticBox))
+	var err error
+	ovpnAdmin.htmlTemplates, err = template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html", "templates/partials/*.html")
+	if err != nil {
+		log.Fatalf("Error loading HTML templates: %v", err)
+	}
 
-	http.Handle(*listenBaseUrl, http.StripPrefix(strings.TrimRight(*listenBaseUrl, "/"), static))
+	// Serve static files from embedded filesystem
+	staticSubFS, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		log.Fatalf("Error creating static sub-filesystem: %v", err)
+	}
+	staticHandler := CacheControlWrapper(http.FileServer(http.FS(staticSubFS)))
+
+	// Static files route
+	http.Handle(*listenBaseUrl+"static/", http.StripPrefix(strings.TrimRight(*listenBaseUrl, "/")+"/static", staticHandler))
+
+	// Main page route
+	http.HandleFunc(*listenBaseUrl, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == *listenBaseUrl || r.URL.Path == strings.TrimRight(*listenBaseUrl, "/") {
+			ovpnAdmin.indexPageHandler(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	// User list (HTMX partial)
+	http.HandleFunc(*listenBaseUrl+"users", ovpnAdmin.userListHandler)
+
+	// User operations
+	http.HandleFunc(*listenBaseUrl+"users/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, *listenBaseUrl+"users/")
+		parts := strings.Split(path, "/")
+
+		if len(parts) == 0 || parts[0] == "" {
+			// POST /users - create user
+			if r.Method == http.MethodPost {
+				ovpnAdmin.userCreateHandler(w, r)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+
+		username := parts[0]
+
+		if len(parts) == 1 {
+			// DELETE /users/{username} - delete user
+			if r.Method == http.MethodDelete {
+				ovpnAdmin.userDeleteHandler(w, r)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+
+		action := parts[1]
+		switch action {
+		case "revoke":
+			ovpnAdmin.userRevokeHandler(w, r)
+		case "unrevoke":
+			ovpnAdmin.userUnrevokeHandler(w, r)
+		case "rotate":
+			ovpnAdmin.userRotateHandler(w, r)
+		case "password":
+			ovpnAdmin.userChangePasswordHandler(w, r)
+		case "config":
+			if len(parts) > 2 && parts[2] == "download" {
+				ovpnAdmin.userShowConfigHandler(w, r)
+			} else {
+				ovpnAdmin.userShowConfigHandler(w, r)
+			}
+		case "ccd":
+			if r.Method == http.MethodPost {
+				ovpnAdmin.userApplyCcdHandler(w, r)
+			} else {
+				ovpnAdmin.userShowCcdHandler(w, r)
+			}
+		default:
+			log.Warnf("Unknown action: %s for user: %s", action, username)
+			http.NotFound(w, r)
+		}
+	})
+
+	// Modal routes
+	http.HandleFunc(*listenBaseUrl+"modal/create", ovpnAdmin.modalCreateHandler)
+	http.HandleFunc(*listenBaseUrl+"modal/password/", ovpnAdmin.modalPasswordHandler)
+	http.HandleFunc(*listenBaseUrl+"modal/rotate/", ovpnAdmin.modalRotateHandler)
+	http.HandleFunc(*listenBaseUrl+"modal/delete/", ovpnAdmin.modalDeleteHandler)
+	http.HandleFunc(*listenBaseUrl+"modal/ccd/", ovpnAdmin.userShowCcdHandler)
+
+	// Keep API routes for backwards compatibility and internal use
 	http.HandleFunc(*listenBaseUrl+"api/server/settings", ovpnAdmin.serverSettingsHandler)
-	http.HandleFunc(*listenBaseUrl+"api/users/list", ovpnAdmin.userListHandler)
-	http.HandleFunc(*listenBaseUrl+"api/user/create", ovpnAdmin.userCreateHandler)
-	http.HandleFunc(*listenBaseUrl+"api/user/change-password", ovpnAdmin.userChangePasswordHandler)
-	http.HandleFunc(*listenBaseUrl+"api/user/rotate", ovpnAdmin.userRotateHandler)
-	http.HandleFunc(*listenBaseUrl+"api/user/delete", ovpnAdmin.userDeleteHandler)
-	http.HandleFunc(*listenBaseUrl+"api/user/revoke", ovpnAdmin.userRevokeHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/unrevoke", ovpnAdmin.userUnrevokeHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/config/show", ovpnAdmin.userShowConfigHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/disconnect", ovpnAdmin.userDisconnectHandler)
@@ -676,15 +986,15 @@ func renderIndexTxt(data []indexTxtLine) string {
 	return indexTxt
 }
 
-func (oAdmin *OvpnAdmin) getClientConfigTemplate() *template.Template {
+func (oAdmin *OvpnAdmin) getClientConfigTemplate() *texttemplate.Template {
 	if *clientConfigTemplatePath != "" {
-		return template.Must(template.ParseFiles(*clientConfigTemplatePath))
+		return texttemplate.Must(texttemplate.ParseFiles(*clientConfigTemplatePath))
 	} else {
-		clientConfigTpl, clientConfigTplErr := oAdmin.templates.FindString("client.conf.tpl")
+		clientConfigTpl, clientConfigTplErr := templatesFS.ReadFile("templates/client.conf.tpl")
 		if clientConfigTplErr != nil {
-			log.Error("clientConfigTpl not found in templates box")
+			log.Error("clientConfigTpl not found in templates: ", clientConfigTplErr)
 		}
-		return template.Must(template.New("client-config").Parse(clientConfigTpl))
+		return texttemplate.Must(texttemplate.New("client-config").Parse(string(clientConfigTpl)))
 	}
 }
 
@@ -740,15 +1050,15 @@ func (oAdmin *OvpnAdmin) renderClientConfig(username string) string {
 	return fmt.Sprintf("user \"%s\" not found", username)
 }
 
-func (oAdmin *OvpnAdmin) getCcdTemplate() *template.Template {
+func (oAdmin *OvpnAdmin) getCcdTemplate() *texttemplate.Template {
 	if *ccdTemplatePath != "" {
-		return template.Must(template.ParseFiles(*ccdTemplatePath))
+		return texttemplate.Must(texttemplate.ParseFiles(*ccdTemplatePath))
 	} else {
-		ccdTpl, ccdTplErr := oAdmin.templates.FindString("ccd.tpl")
+		ccdTpl, ccdTplErr := templatesFS.ReadFile("templates/ccd.tpl")
 		if ccdTplErr != nil {
-			log.Errorf("ccdTpl not found in templates box")
+			log.Errorf("ccdTpl not found in templates: %v", ccdTplErr)
 		}
-		return template.Must(template.New("ccd").Parse(ccdTpl))
+		return texttemplate.Must(texttemplate.New("ccd").Parse(string(ccdTpl)))
 	}
 }
 

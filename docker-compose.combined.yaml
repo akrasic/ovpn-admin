@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  openvpn-admin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openvpn-admin:combined
+    container_name: openvpn-admin
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "1194:1194/tcp"    # OpenVPN
+      - "1194:1194/udp"    # OpenVPN (UDP)
+      - "8080:8080"        # ovpn-admin web interface
+    environment:
+      # OpenVPN settings
+      OVPN_SERVER_NET: "172.16.100.0"
+      OVPN_SERVER_MASK: "255.255.255.0"
+      OVPN_PASSWD_AUTH: "true"
+
+      # ovpn-admin settings
+      OVPN_NETWORK: "172.16.100.0/24"
+      OVPN_CCD: "true"
+      OVPN_CCD_PATH: "/etc/openvpn/ccd"
+      EASYRSA_PATH: "/etc/openvpn/easyrsa"
+      OVPN_INDEX_PATH: "/etc/openvpn/easyrsa/pki/index.txt"
+      OVPN_AUTH: "true"
+      OVPN_AUTH_DB_PATH: "/etc/openvpn/easyrsa/pki/users.db"
+      OVPN_MGMT: "main=127.0.0.1:8989"
+      OVPN_SERVER: "YOUR_PUBLIC_IP:1194:tcp"  # Change to your server's public IP
+      LOG_LEVEL: "info"
+    volumes:
+      # Persist certificates and configuration
+      - openvpn_data:/etc/openvpn/easyrsa
+      - openvpn_ccd:/etc/openvpn/ccd
+    restart: unless-stopped
+
+volumes:
+  openvpn_data:
+  openvpn_ccd:

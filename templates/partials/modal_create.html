@@ -1,0 +1,51 @@
+{{define "modal_create"}}
+<div class="modal-backdrop-custom show" onclick="if(event.target === this) closeModal()">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Add new user</h5>
+                <button type="button" class="btn-close" onclick="closeModal()"></button>
+            </div>
+            <form hx-post="/users"
+                  hx-target="#user-table-body"
+                  hx-swap="innerHTML"
+                  hx-on::after-request="if(event.detail.successful) closeModal()">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">Username</label>
+                        <input type="text"
+                               class="form-control"
+                               id="username"
+                               name="username"
+                               placeholder="Username [a-zA-Z0-9_.-@]"
+                               pattern="^[a-zA-Z0-9_.@-]+$"
+                               required
+                               autofocus>
+                        <div class="form-text">Allowed characters: letters, numbers, underscore, dot, hyphen, @</div>
+                    </div>
+                    {{if hasModule .Modules "passwdAuth"}}
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Password</label>
+                        <input type="password"
+                               class="form-control"
+                               id="password"
+                               name="password"
+                               placeholder="Password (min 6 characters)"
+                               minlength="6"
+                               required>
+                    </div>
+                    {{end}}
+                    <div id="create-error" class="alert alert-danger d-none"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-square" onclick="closeModal()">Close</button>
+                    <button type="submit" class="btn btn-success btn-square">
+                        <span class="htmx-indicator spinner-border spinner-border-sm me-1"></span>
+                        Create
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{{end}}

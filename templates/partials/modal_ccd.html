@@ -1,0 +1,132 @@
+{{define "modal_ccd"}}
+<div class="modal-backdrop-custom show" onclick="if(event.target === this) closeModal()">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Routes for: <strong>{{.Ccd.Name}}</strong></h5>
+                <button type="button" class="btn-close" onclick="closeModal()"></button>
+            </div>
+            <form hx-post="/users/{{.Ccd.Name}}/ccd"
+                  hx-target="#ccd-result"
+                  hx-swap="innerHTML">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Static Address</label>
+                        <div class="input-group">
+                            <input type="text"
+                                   class="form-control"
+                                   id="clientAddress"
+                                   name="clientAddress"
+                                   value="{{.Ccd.ClientAddress}}"
+                                   placeholder="e.g., 10.8.0.100"
+                                   {{if eq .ServerRole "slave"}}readonly{{end}}>
+                            {{if eq .ServerRole "master"}}
+                            <button type="button" class="btn btn-warning" onclick="document.getElementById('clientAddress').value='dynamic'">
+                                Clear
+                            </button>
+                            {{end}}
+                        </div>
+                        <div class="form-text">Enter an IP address or "dynamic" for DHCP</div>
+                    </div>
+
+                    <h6>Custom Routes</h6>
+                    <div class="table-responsive">
+                        <table class="table table-bordered table-sm ccd-routes">
+                            <thead>
+                                <tr>
+                                    <th>Address</th>
+                                    <th>Mask</th>
+                                    <th>Description</th>
+                                    {{if eq .ServerRole "master"}}<th>Action</th>{{end}}
+                                </tr>
+                            </thead>
+                            <tbody id="routes-table">
+                                {{range $index, $route := .Ccd.CustomRoutes}}
+                                <tr id="route-{{$index}}">
+                                    <td>
+                                        {{if eq $.ServerRole "slave"}}
+                                            {{$route.Address}}
+                                        {{else}}
+                                            <input type="text" name="routes[{{$index}}].address" value="{{$route.Address}}">
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if eq $.ServerRole "slave"}}
+                                            {{$route.Mask}}
+                                        {{else}}
+                                            <input type="text" name="routes[{{$index}}].mask" value="{{$route.Mask}}">
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if eq $.ServerRole "slave"}}
+                                            {{$route.Description}}
+                                        {{else}}
+                                            <input type="text" name="routes[{{$index}}].description" value="{{$route.Description}}">
+                                        {{end}}
+                                    </td>
+                                    {{if eq $.ServerRole "master"}}
+                                    <td>
+                                        <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('tr').remove()">Delete</button>
+                                    </td>
+                                    {{end}}
+                                </tr>
+                                {{end}}
+                            </tbody>
+                            {{if eq .ServerRole "master"}}
+                            <tfoot>
+                                <tr id="new-route-row">
+                                    <td><input type="text" id="new-address" placeholder="10.0.0.0"></td>
+                                    <td><input type="text" id="new-mask" placeholder="255.255.255.0"></td>
+                                    <td><input type="text" id="new-description" placeholder="Description"></td>
+                                    <td>
+                                        <button type="button" class="btn btn-sm btn-success" onclick="addRoute()">Add</button>
+                                    </td>
+                                </tr>
+                            </tfoot>
+                            {{end}}
+                        </table>
+                    </div>
+
+                    <div id="ccd-result"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-square" onclick="closeModal()">Close</button>
+                    {{if eq .ServerRole "master"}}
+                    <button type="submit" class="btn btn-success btn-square">
+                        <span class="htmx-indicator spinner-border spinner-border-sm me-1"></span>
+                        Save
+                    </button>
+                    {{end}}
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<script>
+var routeIndex = {{len .Ccd.CustomRoutes}};
+function addRoute() {
+    const tbody = document.getElementById('routes-table');
+    const address = document.getElementById('new-address').value;
+    const mask = document.getElementById('new-mask').value;
+    const description = document.getElementById('new-description').value;
+
+    if (!address || !mask) return;
+
+    const tr = document.createElement('tr');
+    tr.id = 'route-' + routeIndex;
+    tr.innerHTML = `
+        <td><input type="text" name="routes[${routeIndex}].address" value="${address}"></td>
+        <td><input type="text" name="routes[${routeIndex}].mask" value="${mask}"></td>
+        <td><input type="text" name="routes[${routeIndex}].description" value="${description}"></td>
+        <td><button type="button" class="btn btn-sm btn-danger" onclick="this.closest('tr').remove()">Delete</button></td>
+    `;
+    tbody.appendChild(tr);
+    routeIndex++;
+
+    // Clear inputs
+    document.getElementById('new-address').value = '';
+    document.getElementById('new-mask').value = '';
+    document.getElementById('new-description').value = '';
+}
+</script>
+{{end}}

@@ -1,0 +1,24 @@
+{{define "modal_config"}}
+<div class="modal-backdrop-custom show" onclick="if(event.target === this) closeModal()">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">OpenVPN config for: <strong>{{.Username}}</strong></h5>
+                <button type="button" class="btn-close" onclick="closeModal()"></button>
+            </div>
+            <div class="modal-body">
+                <pre class="config-display" id="config-content">{{.Config}}</pre>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-success btn-square" onclick="copyToClipboard(document.getElementById('config-content').textContent)">
+                    Copy
+                </button>
+                <button type="button" class="btn btn-info btn-square" onclick="downloadConfig('{{.Username}}')">
+                    Download
+                </button>
+                <button type="button" class="btn btn-secondary btn-square" onclick="closeModal()">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
