@@ -30,7 +30,15 @@ data:
     persist-key
     persist-tun
 
-    cipher AES-128-CBC
+    # Encryption (modern AEAD cipher with fallback)
+    data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+    data-ciphers-fallback AES-256-CBC
+    auth SHA256
+
+    # TLS hardening
+    tls-version-min 1.2
+    remote-cert-tls client
+
     duplicate-cn
 
     server {{ $openvpnNetworkAddress }} {{ $openvpnNetworkNetmask }}
@@ -58,6 +66,10 @@ data:
     #!/bin/sh
     set -x
 
+    # Enable IP forwarding (may fail if read-only, set via pod securityContext sysctls instead)
+    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "Note: ip_forward read-only, use pod sysctls"
+
+    # Setup NAT for VPN clients
     iptables -t nat -A POSTROUTING -s {{ $openvpnNetworkAddress }}/{{ $openvpnNetworkNetmask }} ! -d {{ $openvpnNetworkAddress }}/{{ $openvpnNetworkNetmask }} -j MASQUERADE
 
     mkdir -p /dev/net

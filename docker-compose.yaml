@@ -13,6 +13,10 @@ services:
       OVPN_PASSWD_AUTH: "true"
     cap_add:
       - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
     ports:
       - 7777:1194 # for openvpn
       - 8080:8080 # for ovpn-admin because of network_mode

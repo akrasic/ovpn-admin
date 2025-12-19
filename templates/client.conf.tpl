@@ -6,9 +6,13 @@ verb 4
 client
 nobind
 dev tun
-cipher AES-128-CBC
+
+# Cipher negotiation (OpenVPN 2.4+)
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC
+data-ciphers-fallback AES-256-CBC
+auth SHA256
+
 key-direction 1
-#redirect-gateway def1
 tls-client
 remote-cert-tls server
 # uncomment below lines for use with linux

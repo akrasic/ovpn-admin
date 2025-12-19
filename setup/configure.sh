@@ -30,8 +30,8 @@ else
 fi
 easyrsa gen-crl
 
-# Enable IP forwarding
-echo 1 > /proc/sys/net/ipv4/ip_forward
+# Enable IP forwarding (may fail if read-only, set via docker-compose sysctls instead)
+echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "Note: ip_forward is read-only, ensure sysctls is set in docker-compose"
 
 # Setup NAT for VPN clients
 iptables -t nat -D POSTROUTING -s "${OVPN_SRV_NET}/${OVPN_SRV_MASK}" ! -d "${OVPN_SRV_NET}/${OVPN_SRV_MASK}" -j MASQUERADE || true
