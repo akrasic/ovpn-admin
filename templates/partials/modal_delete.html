@@ -1,9 +1,12 @@
 {{define "modal_delete"}}
 <div class="modal-backdrop-custom show" onclick="if(event.target === this) closeModal()">
-    <div class="modal-dialog modal-lg">
+    <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Delete user: <strong>{{.Username}}</strong></h5>
+                <h5 class="modal-title">
+                    <i class="bi bi-exclamation-triangle text-danger me-2"></i>
+                    Delete User
+                </h5>
                 <button type="button" class="btn-close" onclick="closeModal()"></button>
             </div>
             <form hx-delete="/users/{{.Username}}"
@@ -11,17 +14,22 @@
                   hx-swap="innerHTML"
                   hx-on::after-request="if(event.detail.successful) closeModal()">
                 <div class="modal-body">
-                    <div class="alert alert-warning">
-                        <strong>Warning!</strong> This action cannot be undone. The user and their certificates will be permanently deleted.
+                    <div class="alert alert-danger d-flex align-items-start">
+                        <i class="bi bi-exclamation-octagon-fill me-3 mt-1"></i>
+                        <div>
+                            <strong>This action cannot be undone!</strong>
+                            <p class="mb-0 mt-1">The user and their certificates will be permanently deleted.</p>
+                        </div>
                     </div>
-                    <p>Are you sure you want to delete user <strong>{{.Username}}</strong>?</p>
+                    <p>Are you sure you want to delete <strong>{{.Username}}</strong>?</p>
                     <div id="delete-error" class="alert alert-danger d-none"></div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary btn-square" onclick="closeModal()">Cancel</button>
-                    <button type="submit" class="btn btn-danger btn-square">
+                    <button type="button" class="btn btn-outline-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-danger">
                         <span class="htmx-indicator spinner-border spinner-border-sm me-1"></span>
-                        Delete
+                        <i class="bi bi-trash me-1"></i>
+                        Delete User
                     </button>
                 </div>
             </form>

@@ -1,27 +1,91 @@
 {{define "user_rows"}}
 {{range $index, $user := .Users}}
-<tr id="user-row-{{$user.Identity}}" class="{{if eq $user.ConnectionStatus "Connected"}}connected-user{{end}}{{if eq $user.AccountStatus "Revoked"}} revoked-user{{end}}{{if eq $user.AccountStatus "Expired"}} expired-user{{end}}">
-    <td>{{add $index 1}}</td>
-    <td>{{$user.Identity}}</td>
-    <td>{{$user.AccountStatus}}</td>
-    <td>{{$user.Connections}}</td>
-    <td>{{$user.ExpirationDate}}</td>
-    <td>{{if $user.RevocationDate}}{{$user.RevocationDate}}{{end}}</td>
+<tr id="user-row-{{$user.Identity}}" class="{{if eq $user.ConnectionStatus "Connected"}}connected-user{{end}}{{if eq $user.AccountStatus "Revoked"}} revoked-user{{end}}{{if eq $user.AccountStatus "Expired"}} expired-user{{end}}{{if $user.ExpiringSoon}} expiring-soon-user{{end}}">
+    {{if eq $.ServerRole "master"}}
+    <td class="col-checkbox">
+        {{if eq $user.AccountStatus "Active"}}
+        <input type="checkbox" class="form-check-input user-checkbox"
+               data-username="{{$user.Identity}}"
+               onchange="toggleUserSelection('{{$user.Identity}}', this)">
+        {{end}}
+    </td>
+    {{end}}
+    <td class="col-num">{{add $index 1}}</td>
+    <td>
+        <div class="user-identity">
+            <strong>{{$user.Identity}}</strong>
+            {{if eq $user.ConnectionStatus "Connected"}}
+            <span class="badge bg-success ms-2" style="font-size: 0.65rem;">
+                <i class="bi bi-wifi"></i> Online
+            </span>
+            {{end}}
+        </div>
+    </td>
+    <td>
+        {{if eq $user.AccountStatus "Active"}}
+        <span class="status-badge status-active">
+            <i class="bi bi-check-circle-fill"></i> Active
+        </span>
+        {{else if eq $user.AccountStatus "Revoked"}}
+        <span class="status-badge status-revoked">
+            <i class="bi bi-x-circle-fill"></i> Revoked
+        </span>
+        {{else if eq $user.AccountStatus "Expired"}}
+        <span class="status-badge status-expired">
+            <i class="bi bi-exclamation-triangle-fill"></i> Expired
+        </span>
+        {{else}}
+        <span class="status-badge">{{$user.AccountStatus}}</span>
+        {{end}}
+    </td>
+    <td class="text-center">
+        {{if gt $user.Connections 0}}
+        <span class="connection-count active" title="{{$user.Connections}} active connection(s)">{{$user.Connections}}</span>
+        {{else}}
+        <span class="connection-count inactive">0</span>
+        {{end}}
+    </td>
+    <td>
+        {{if $user.ExpirationDate}}
+        <span class="{{if $user.ExpiringSoon}}text-warning fw-semibold{{else}}text-muted{{end}}">
+            {{$user.ExpirationDate}}
+        </span>
+        {{if $user.ExpiringSoon}}
+        <span class="expiring-badge" title="Certificate expiring soon">
+            <i class="bi bi-exclamation-triangle-fill"></i> Soon
+        </span>
+        {{end}}
+        {{else}}
+        <span class="text-muted">-</span>
+        {{end}}
+    </td>
+    <td>
+        {{if $user.RevocationDate}}
+        <span class="text-muted">{{$user.RevocationDate}}</span>
+        {{else}}
+        <span class="text-muted">-</span>
+        {{end}}
+    </td>
     <td class="text-end">
         {{template "user_actions" dict "User" $user "ServerRole" $.ServerRole "Modules" $.Modules}}
     </td>
 </tr>
 {{else}}
 <tr>
-    <td colspan="7" class="text-center py-4">
-        <h5>No users found.</h5>
-        {{if eq $.ServerRole "master"}}
-        <button type="button" class="btn btn-success btn-square mt-2"
-                hx-get="/modal/create"
-                hx-target="#modal-container">
-            Add user
-        </button>
-        {{end}}
+    <td colspan="{{if eq $.ServerRole "master"}}8{{else}}7{{end}}" class="text-center py-5">
+        <div class="empty-state-inline">
+            <i class="bi bi-people text-muted" style="font-size: 2rem;"></i>
+            <h5 class="mt-3 mb-2">No users found</h5>
+            <p class="text-muted mb-3">No users match your search criteria</p>
+            {{if eq $.ServerRole "master"}}
+            <button type="button" class="btn btn-primary"
+                    hx-get="/modal/create"
+                    hx-target="#modal-container">
+                <i class="bi bi-plus-lg"></i>
+                Add User
+            </button>
+            {{end}}
+        </div>
     </td>
 </tr>
 {{end}}

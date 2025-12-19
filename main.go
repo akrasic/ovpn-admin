@@ -229,6 +229,14 @@ type OpenvpnClient struct {
 	RevocationDate   string `json:"RevocationDate"`
 	ConnectionStatus string `json:"ConnectionStatus"`
 	Connections      int    `json:"Connections"`
+	ExpiringSoon     bool   `json:"ExpiringSoon"`
+}
+
+type DashboardStats struct {
+	TotalUsers        int `json:"TotalUsers"`
+	ActiveConnections int `json:"ActiveConnections"`
+	RevokedUsers      int `json:"RevokedUsers"`
+	ExpiringSoon      int `json:"ExpiringSoon"`
 }
 
 type ccdRoute struct {
@@ -569,6 +577,58 @@ func (oAdmin *OvpnAdmin) serverSettingsHandler(w http.ResponseWriter, r *http.Re
 	fmt.Fprintf(w, `{"status":"ok", "serverRole": "%s", "modules": %s }`, oAdmin.role, string(enabledModules))
 }
 
+// calculateStats computes dashboard statistics from clients
+func (oAdmin *OvpnAdmin) calculateStats() DashboardStats {
+	stats := DashboardStats{}
+	now := time.Now()
+	thirtyDaysFromNow := now.AddDate(0, 0, 30)
+
+	for _, client := range oAdmin.clients {
+		stats.TotalUsers++
+		stats.ActiveConnections += client.Connections
+
+		if client.AccountStatus == "Revoked" {
+			stats.RevokedUsers++
+		}
+
+		// Check if certificate expires within 30 days
+		if client.AccountStatus == "Active" && client.ExpirationDate != "" {
+			expDate, err := time.Parse("2006-01-02 15:04:05", client.ExpirationDate)
+			if err == nil && expDate.Before(thirtyDaysFromNow) && expDate.After(now) {
+				stats.ExpiringSoon++
+			}
+		}
+	}
+
+	return stats
+}
+
+// Stats handler - returns stats HTML fragment for HTMX refresh
+func (oAdmin *OvpnAdmin) statsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Debug(r.RemoteAddr, " ", r.RequestURI)
+
+	// Refresh state to get latest data
+	if *storageBackend == "kubernetes.secrets" {
+		err := app.updateIndexTxtOnDisk()
+		if err != nil {
+			log.Errorln(err)
+		}
+	}
+	oAdmin.activeClients = oAdmin.mgmtGetActiveClients()
+	oAdmin.clients = oAdmin.usersList()
+
+	stats := oAdmin.calculateStats()
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "stats_cards", map[string]interface{}{
+		"Stats": stats,
+	})
+	if err != nil {
+		log.Errorf("Error rendering stats template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 // Index page handler - renders the main page
 func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
@@ -580,11 +640,12 @@ func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "base", map[string]interface{}{
-		"Users":      oAdmin.clients,
-		"ServerRole": oAdmin.role,
-		"Modules":    oAdmin.modules,
+		"Users":       oAdmin.clients,
+		"ServerRole":  oAdmin.role,
+		"Modules":     oAdmin.modules,
 		"HideRevoked": hideRevoked,
-		"LastSync":   oAdmin.lastSuccessfulSyncTime,
+		"LastSync":    oAdmin.lastSuccessfulSyncTime,
+		"Stats":       oAdmin.calculateStats(),
 	})
 	if err != nil {
 		log.Errorf("Error rendering index template: %v", err)
@@ -824,6 +885,9 @@ func main() {
 
 	// User list (HTMX partial)
 	http.HandleFunc(*listenBaseUrl+"users", ovpnAdmin.userListHandler)
+
+	// Stats (HTMX partial for dashboard refresh)
+	http.HandleFunc(*listenBaseUrl+"stats", ovpnAdmin.statsHandler)
 
 	// User operations
 	http.HandleFunc(*listenBaseUrl+"users/", func(w http.ResponseWriter, r *http.Request) {
@@ -1264,6 +1328,7 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 	connectedUniqUsers := 0
 	totalActiveConnections := 0
 	apochNow := time.Now().Unix()
+	thirtyDaysFromNow := time.Now().AddDate(0, 0, 30).Unix()
 
 	for _, line := range indexTxtParser(fRead(*indexTxtPath)) {
 		if line.Identity != "server" && !strings.Contains(line.Identity, "REVOKED") {
@@ -1282,11 +1347,18 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 				expiredCerts += 1
 			}
 
-			ovpnClientCertificateExpire.WithLabelValues(line.Identity).Set(float64((parseDateToUnix(indexTxtDateLayout, line.ExpirationDate) - apochNow) / 3600 / 24))
+			expirationUnix := parseDateToUnix(indexTxtDateLayout, line.ExpirationDate)
+			ovpnClientCertificateExpire.WithLabelValues(line.Identity).Set(float64((expirationUnix - apochNow) / 3600 / 24))
 
-			if (parseDateToUnix(indexTxtDateLayout, line.ExpirationDate) - apochNow) < 0 {
+			if (expirationUnix - apochNow) < 0 {
 				ovpnClient.AccountStatus = "Expired"
 			}
+
+			// Check if certificate expires within 30 days
+			if ovpnClient.AccountStatus == "Active" && expirationUnix > apochNow && expirationUnix < thirtyDaysFromNow {
+				ovpnClient.ExpiringSoon = true
+			}
+
 			ovpnClient.Connections = 0
 
 			userConnected, userConnectedTo := isUserConnected(line.Identity, oAdmin.activeClients)

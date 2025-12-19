@@ -3,20 +3,26 @@
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">OpenVPN config for: <strong>{{.Username}}</strong></h5>
+                <h5 class="modal-title">
+                    <i class="bi bi-file-earmark-code me-2"></i>
+                    OpenVPN Configuration
+                </h5>
                 <button type="button" class="btn-close" onclick="closeModal()"></button>
             </div>
             <div class="modal-body">
+                <p class="text-muted mb-3">Configuration file for <strong>{{.Username}}</strong></p>
                 <pre class="config-display" id="config-content">{{.Config}}</pre>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-success btn-square" onclick="copyToClipboard(document.getElementById('config-content').textContent)">
+                <button type="button" class="btn btn-outline-secondary" onclick="closeModal()">Close</button>
+                <button type="button" class="btn btn-outline-primary" onclick="copyToClipboard(document.getElementById('config-content').textContent)">
+                    <i class="bi bi-clipboard me-1"></i>
                     Copy
                 </button>
-                <button type="button" class="btn btn-info btn-square" onclick="downloadConfig('{{.Username}}')">
+                <button type="button" class="btn btn-primary" onclick="downloadConfig('{{.Username}}')">
+                    <i class="bi bi-download me-1"></i>
                     Download
                 </button>
-                <button type="button" class="btn btn-secondary btn-square" onclick="closeModal()">Close</button>
             </div>
         </div>
     </div>

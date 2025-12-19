@@ -1,20 +1,71 @@
 {{define "base"}}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ovpn-admin</title>
+    <meta name="color-scheme" content="light dark">
+    <title>OpenVPN Admin</title>
     <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="/static/style.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.2/dist/htmx.min.js"></script>
 </head>
 <body>
-    <div class="container-fluid py-3">
-        {{template "content" .}}
-    </div>
+    <!-- Header -->
+    <header class="app-header">
+        <div class="header-content">
+            <div class="header-brand">
+                <div class="brand-icon">
+                    <i class="bi bi-shield-lock-fill"></i>
+                </div>
+                <div class="brand-text">
+                    <h1>OpenVPN Admin</h1>
+                    <span class="brand-subtitle">User Management Console</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                {{if eq .ServerRole "slave"}}
+                <div class="server-badge server-badge-slave">
+                    <i class="bi bi-arrow-repeat"></i>
+                    <span>Replica</span>
+                    <span class="sync-time">Last sync: {{.LastSync}}</span>
+                </div>
+                {{else}}
+                <div class="server-badge server-badge-master">
+                    <i class="bi bi-database-fill"></i>
+                    <span>Primary</span>
+                </div>
+                {{end}}
+
+                <!-- Live status indicator -->
+                <div class="live-indicator" id="live-indicator" title="Auto-refresh active">
+                    <span class="live-dot"></span>
+                    <span class="live-text">Live</span>
+                </div>
+
+                <!-- Theme toggle -->
+                <button type="button" class="btn-icon theme-toggle" id="theme-toggle" title="Toggle dark mode (Ctrl+D)">
+                    <i class="bi bi-sun-fill theme-icon-light"></i>
+                    <i class="bi bi-moon-fill theme-icon-dark"></i>
+                </button>
+
+                <!-- Keyboard shortcuts help -->
+                <button type="button" class="btn-icon" id="shortcuts-btn" title="Keyboard shortcuts (?)">
+                    <i class="bi bi-keyboard"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="app-main">
+        <div class="container-fluid">
+            {{template "content" .}}
+        </div>
+    </main>
 
     <!-- Modal container -->
     <div id="modal-container"></div>
@@ -22,9 +73,54 @@
     <!-- Toast container -->
     <div id="toast-container" class="toast-container position-fixed bottom-0 start-0 p-3"></div>
 
+    <!-- Keyboard shortcuts modal -->
+    <div class="modal fade" id="shortcuts-modal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-keyboard me-2"></i>
+                        Keyboard Shortcuts
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="shortcut-list">
+                        <div class="shortcut-item">
+                            <span class="shortcut-keys"><kbd>N</kbd></span>
+                            <span class="shortcut-desc">Add new user</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-keys"><kbd>/</kbd> or <kbd>Ctrl</kbd>+<kbd>K</kbd></span>
+                            <span class="shortcut-desc">Focus search</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-keys"><kbd>R</kbd></span>
+                            <span class="shortcut-desc">Refresh user list</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-keys"><kbd>Ctrl</kbd>+<kbd>D</kbd></span>
+                            <span class="shortcut-desc">Toggle dark mode</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-keys"><kbd>Esc</kbd></span>
+                            <span class="shortcut-desc">Close modal/dialog</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-keys"><kbd>?</kbd></span>
+                            <span class="shortcut-desc">Show this help</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Cookie helper
+        // =====================================================================
+        // Cookie helpers
+        // =====================================================================
         function getCookie(name) {
             const value = "; " + document.cookie;
             const parts = value.split("; " + name + "=");
@@ -36,20 +132,44 @@
             document.cookie = name + "=" + value + "; path=/; max-age=31536000";
         }
 
-        // Toggle hide revoked filter
-        function toggleHideRevoked() {
-            const current = getCookie('hideRevoked') === 'true';
-            setCookie('hideRevoked', !current);
-            return true;
+        // =====================================================================
+        // Dark mode
+        // =====================================================================
+        function initTheme() {
+            const savedTheme = getCookie('theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (prefersDark ? 'dark' : 'light');
+            setTheme(theme);
         }
 
-        // Toast notification handler
-        document.body.addEventListener("showToast", function(e) {
-            const detail = e.detail;
+        function setTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            setCookie('theme', theme);
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme');
+            setTheme(current === 'dark' ? 'light' : 'dark');
+        }
+
+        // Listen for system theme changes
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+            if (!getCookie('theme')) {
+                setTheme(e.matches ? 'dark' : 'light');
+            }
+        });
+
+        // =====================================================================
+        // Toast notifications
+        // =====================================================================
+        function showToast(message, type = 'info') {
             const toastHtml = `
-                <div class="toast align-items-center text-bg-${detail.type === 'success' ? 'success' : detail.type === 'error' ? 'danger' : 'warning'} border-0" role="alert">
+                <div class="toast align-items-center text-bg-${type === 'success' ? 'success' : type === 'error' ? 'danger' : type === 'warning' ? 'warning' : 'info'} border-0" role="alert">
                     <div class="d-flex">
-                        <div class="toast-body">${detail.message}</div>
+                        <div class="toast-body">
+                            <i class="bi bi-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : type === 'warning' ? 'exclamation-triangle' : 'info-circle'} me-2"></i>
+                            ${message}
+                        </div>
                         <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
                     </div>
                 </div>
@@ -57,45 +177,303 @@
             const container = document.getElementById('toast-container');
             container.insertAdjacentHTML('beforeend', toastHtml);
             const toastEl = container.lastElementChild;
-            const toast = new bootstrap.Toast(toastEl, { delay: 3000 });
+            const toast = new bootstrap.Toast(toastEl, { delay: 4000 });
             toast.show();
             toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
-        });
-
-        // Close modal handler
-        function closeModal() {
-            const container = document.getElementById('modal-container');
-            container.innerHTML = '';
         }
 
-        // Download config file
+        document.body.addEventListener("showToast", function(e) {
+            showToast(e.detail.message, e.detail.type);
+        });
+
+        // =====================================================================
+        // Modal helpers
+        // =====================================================================
+        function closeModal() {
+            document.getElementById('modal-container').innerHTML = '';
+        }
+
+        // =====================================================================
+        // Config download
+        // =====================================================================
         function downloadConfig(username) {
             fetch('/users/' + encodeURIComponent(username) + '/config/download')
-                .then(response => response.text())
+                .then(response => {
+                    if (!response.ok) throw new Error('Download failed');
+                    return response.text();
+                })
                 .then(data => {
-                    const blob = new Blob([data], { type: 'text/plain' });
+                    const blob = new Blob([data], { type: 'application/x-openvpn-profile' });
                     const link = document.createElement('a');
                     link.href = URL.createObjectURL(blob);
                     link.download = username + '.ovpn';
                     link.click();
                     URL.revokeObjectURL(link.href);
-                });
+                    showToast('Configuration downloaded', 'success');
+                })
+                .catch(err => showToast('Download failed: ' + err.message, 'error'));
         }
 
-        // Copy to clipboard
+        // =====================================================================
+        // Clipboard
+        // =====================================================================
         function copyToClipboard(text) {
             navigator.clipboard.writeText(text).then(() => {
-                document.body.dispatchEvent(new CustomEvent('showToast', {
-                    detail: { message: 'Copied to clipboard', type: 'success' }
-                }));
+                showToast('Copied to clipboard', 'success');
+            }).catch(() => {
+                showToast('Failed to copy', 'error');
             });
         }
 
-        // Handle HTMX response errors
+        // =====================================================================
+        // Toggle revoked filter
+        // =====================================================================
+        function toggleHideRevoked() {
+            const current = getCookie('hideRevoked') === 'true';
+            setCookie('hideRevoked', !current);
+            return true;
+        }
+
+        // =====================================================================
+        // Auto-refresh for live status
+        // =====================================================================
+        let autoRefreshInterval = null;
+        const AUTO_REFRESH_MS = 15000; // 15 seconds
+
+        function startAutoRefresh() {
+            if (autoRefreshInterval) return;
+            autoRefreshInterval = setInterval(() => {
+                const tableBody = document.getElementById('user-table-body');
+                if (tableBody) {
+                    htmx.trigger(tableBody, 'refresh');
+                }
+                // Update stats
+                const statsContainer = document.querySelector('.stats-grid');
+                if (statsContainer) {
+                    htmx.ajax('GET', '/stats', {target: '.stats-grid', swap: 'innerHTML'});
+                }
+            }, AUTO_REFRESH_MS);
+            document.getElementById('live-indicator')?.classList.add('active');
+        }
+
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+            document.getElementById('live-indicator')?.classList.remove('active');
+        }
+
+        function toggleAutoRefresh() {
+            if (autoRefreshInterval) {
+                stopAutoRefresh();
+                showToast('Auto-refresh paused', 'info');
+            } else {
+                startAutoRefresh();
+                showToast('Auto-refresh enabled', 'success');
+            }
+        }
+
+        // =====================================================================
+        // Keyboard shortcuts
+        // =====================================================================
+        function initKeyboardShortcuts() {
+            document.addEventListener('keydown', function(e) {
+                // Ignore if typing in input/textarea
+                if (e.target.matches('input, textarea, select')) {
+                    if (e.key === 'Escape') {
+                        e.target.blur();
+                    }
+                    return;
+                }
+
+                // Ctrl+D - Toggle dark mode
+                if (e.ctrlKey && e.key === 'd') {
+                    e.preventDefault();
+                    toggleTheme();
+                    return;
+                }
+
+                // Ctrl+K or / - Focus search
+                if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+                    e.preventDefault();
+                    document.querySelector('.search-input')?.focus();
+                    return;
+                }
+
+                // Without modifiers
+                if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+                    switch(e.key) {
+                        case 'n':
+                        case 'N':
+                            // New user - only if master
+                            const addBtn = document.querySelector('[hx-get="/modal/create"]');
+                            if (addBtn) {
+                                e.preventDefault();
+                                htmx.trigger(addBtn, 'click');
+                            }
+                            break;
+                        case 'r':
+                        case 'R':
+                            // Refresh
+                            e.preventDefault();
+                            htmx.trigger('#user-table-body', 'refresh');
+                            showToast('Refreshing...', 'info');
+                            break;
+                        case '?':
+                            // Show shortcuts
+                            e.preventDefault();
+                            new bootstrap.Modal(document.getElementById('shortcuts-modal')).show();
+                            break;
+                        case 'Escape':
+                            // Close modal
+                            closeModal();
+                            break;
+                    }
+                }
+            });
+        }
+
+        // =====================================================================
+        // Password strength indicator
+        // =====================================================================
+        function checkPasswordStrength(password) {
+            let strength = 0;
+            if (password.length >= 8) strength++;
+            if (password.length >= 12) strength++;
+            if (/[a-z]/.test(password) && /[A-Z]/.test(password)) strength++;
+            if (/\d/.test(password)) strength++;
+            if (/[^a-zA-Z0-9]/.test(password)) strength++;
+            return Math.min(strength, 4);
+        }
+
+        function updatePasswordStrength(input) {
+            const strength = checkPasswordStrength(input.value);
+            const indicator = input.parentElement.querySelector('.password-strength');
+            if (!indicator) return;
+
+            const labels = ['Weak', 'Fair', 'Good', 'Strong'];
+            const colors = ['danger', 'warning', 'info', 'success'];
+
+            indicator.innerHTML = input.value ? `
+                <div class="strength-bar">
+                    <div class="strength-fill strength-${strength}" style="width: ${(strength + 1) * 25}%"></div>
+                </div>
+                <span class="strength-label text-${colors[strength]}">${labels[strength]}</span>
+            ` : '';
+        }
+
+        // =====================================================================
+        // Bulk actions
+        // =====================================================================
+        let selectedUsers = new Set();
+
+        function toggleUserSelection(username, checkbox) {
+            if (checkbox.checked) {
+                selectedUsers.add(username);
+            } else {
+                selectedUsers.delete(username);
+            }
+            updateBulkActions();
+        }
+
+        function toggleAllUsers(checkbox) {
+            const checkboxes = document.querySelectorAll('.user-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = checkbox.checked;
+                const username = cb.dataset.username;
+                if (checkbox.checked) {
+                    selectedUsers.add(username);
+                } else {
+                    selectedUsers.delete(username);
+                }
+            });
+            updateBulkActions();
+        }
+
+        function updateBulkActions() {
+            const bulkBar = document.getElementById('bulk-actions-bar');
+            const countSpan = document.getElementById('selected-count');
+            if (selectedUsers.size > 0) {
+                bulkBar?.classList.add('show');
+                if (countSpan) countSpan.textContent = selectedUsers.size;
+            } else {
+                bulkBar?.classList.remove('show');
+            }
+        }
+
+        function bulkRevoke() {
+            if (selectedUsers.size === 0) return;
+            if (!confirm(`Revoke ${selectedUsers.size} selected user(s)?`)) return;
+
+            const promises = Array.from(selectedUsers).map(username =>
+                fetch(`/users/${encodeURIComponent(username)}/revoke`, { method: 'POST' })
+            );
+
+            Promise.all(promises).then(() => {
+                showToast(`Revoked ${selectedUsers.size} user(s)`, 'success');
+                selectedUsers.clear();
+                updateBulkActions();
+                htmx.trigger('#user-table-body', 'refresh');
+            }).catch(() => showToast('Bulk revoke failed', 'error'));
+        }
+
+        function clearSelection() {
+            selectedUsers.clear();
+            document.querySelectorAll('.user-checkbox').forEach(cb => cb.checked = false);
+            document.getElementById('select-all-checkbox').checked = false;
+            updateBulkActions();
+        }
+
+        // =====================================================================
+        // HTMX event handlers
+        // =====================================================================
         document.body.addEventListener('htmx:responseError', function(e) {
-            document.body.dispatchEvent(new CustomEvent('showToast', {
-                detail: { message: 'Error: ' + e.detail.xhr.responseText, type: 'error' }
-            }));
+            showToast('Error: ' + (e.detail.xhr.responseText || 'Request failed'), 'error');
+        });
+
+        document.body.addEventListener('htmx:afterSwap', function(e) {
+            // Re-initialize any dynamic elements after HTMX swap
+            initPasswordInputs();
+        });
+
+        // =====================================================================
+        // Initialize password inputs with strength indicator
+        // =====================================================================
+        function initPasswordInputs() {
+            document.querySelectorAll('input[type="password"][data-strength]').forEach(input => {
+                input.addEventListener('input', () => updatePasswordStrength(input));
+            });
+        }
+
+        // =====================================================================
+        // Initialize
+        // =====================================================================
+        document.addEventListener('DOMContentLoaded', function() {
+            initTheme();
+            initKeyboardShortcuts();
+            initPasswordInputs();
+            startAutoRefresh();
+
+            // Theme toggle button
+            document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
+
+            // Shortcuts button
+            document.getElementById('shortcuts-btn')?.addEventListener('click', () => {
+                new bootstrap.Modal(document.getElementById('shortcuts-modal')).show();
+            });
+
+            // Live indicator click to toggle auto-refresh
+            document.getElementById('live-indicator')?.addEventListener('click', toggleAutoRefresh);
+        });
+
+        // Pause auto-refresh when tab is hidden
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                stopAutoRefresh();
+            } else {
+                startAutoRefresh();
+            }
         });
     </script>
 </body>

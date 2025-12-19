@@ -1,69 +1,174 @@
 {{define "content"}}
-<div class="table-actions">
-    {{if eq .ServerRole "master"}}
-    <button type="button" class="btn btn-sm btn-success btn-square"
-            hx-get="/modal/create"
-            hx-target="#modal-container">
-        Add user
-    </button>
-    {{end}}
-
-    {{if eq .ServerRole "slave"}}
-    <span class="badge bg-info slave-badge">Slave - last sync: {{.LastSync}}</span>
-    {{end}}
-
-    <button type="button" class="btn btn-sm btn-secondary btn-square"
-            hx-get="/users"
-            hx-target="#user-table-body"
-            hx-swap="innerHTML"
-            onclick="toggleHideRevoked()">
-        {{if .HideRevoked}}Show revoked{{else}}Hide revoked{{end}}
-    </button>
-
-    <input type="text"
-           class="form-control form-control-sm search-input"
-           placeholder="Search users..."
-           name="search"
-           hx-get="/users"
-           hx-target="#user-table-body"
-           hx-swap="innerHTML"
-           hx-trigger="keyup changed delay:300ms"
-           hx-include="[name='search']">
-
-    <span class="htmx-indicator">
-        <span class="spinner-border spinner-border-sm" role="status"></span>
-    </span>
+<!-- Stats Cards -->
+<div class="stats-grid" hx-get="/stats" hx-trigger="refresh from:body" hx-swap="innerHTML">
+    <div class="stat-card">
+        <div class="stat-icon stat-icon-users">
+            <i class="bi bi-people-fill"></i>
+        </div>
+        <div class="stat-content">
+            <span class="stat-value">{{.Stats.TotalUsers}}</span>
+            <span class="stat-label">Total Users</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon stat-icon-active">
+            <i class="bi bi-wifi"></i>
+        </div>
+        <div class="stat-content">
+            <span class="stat-value">{{.Stats.ActiveConnections}}</span>
+            <span class="stat-label">Active Connections</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon stat-icon-revoked">
+            <i class="bi bi-slash-circle"></i>
+        </div>
+        <div class="stat-content">
+            <span class="stat-value">{{.Stats.RevokedUsers}}</span>
+            <span class="stat-label">Revoked</span>
+        </div>
+    </div>
+    <div class="stat-card{{if gt .Stats.ExpiringSoon 0}} warning{{end}}">
+        <div class="stat-icon stat-icon-expiring">
+            <i class="bi bi-clock-history"></i>
+        </div>
+        <div class="stat-content">
+            <span class="stat-value">{{.Stats.ExpiringSoon}}</span>
+            <span class="stat-label">Expiring Soon</span>
+            {{if gt .Stats.ExpiringSoon 0}}
+            <small class="text-warning">within 30 days</small>
+            {{end}}
+        </div>
+    </div>
 </div>
 
-<div class="table-responsive">
-    <table class="table table-bordered table-hover" id="user-table">
-        <thead class="table-light">
-            <tr>
-                <th scope="col">#</th>
-                <th scope="col">Name</th>
-                <th scope="col">Account Status</th>
-                <th scope="col">Active Connections</th>
-                <th scope="col">Expiration Date</th>
-                <th scope="col">Revocation Date</th>
-                <th scope="col" class="text-end">Actions</th>
-            </tr>
-        </thead>
-        <tbody id="user-table-body" hx-get="/users" hx-trigger="load" hx-swap="innerHTML">
-            <!-- User rows loaded via HTMX -->
-        </tbody>
-    </table>
+<!-- Users Panel -->
+<div class="panel">
+    <div class="panel-header">
+        <h2 class="panel-title">
+            <i class="bi bi-person-badge"></i>
+            User Management
+        </h2>
+        <div class="panel-actions">
+            {{if eq .ServerRole "master"}}
+            <button type="button" class="btn btn-primary"
+                    hx-get="/modal/create"
+                    hx-target="#modal-container"
+                    title="Add new user (N)">
+                <i class="bi bi-plus-lg"></i>
+                Add User
+            </button>
+            {{end}}
+        </div>
+    </div>
+
+    <div class="panel-toolbar">
+        <div class="toolbar-left">
+            {{if eq .ServerRole "master"}}
+            <div class="form-check">
+                <input type="checkbox" class="form-check-input" id="select-all-checkbox"
+                       onchange="toggleAllUsers(this)" title="Select all">
+            </div>
+            {{end}}
+            <button type="button" class="btn btn-outline-secondary btn-sm"
+                    hx-get="/users"
+                    hx-target="#user-table-body"
+                    hx-swap="innerHTML"
+                    onclick="toggleHideRevoked()">
+                <i class="bi bi-eye{{if .HideRevoked}}-slash{{end}}"></i>
+                {{if .HideRevoked}}Show Revoked{{else}}Hide Revoked{{end}}
+            </button>
+            <button type="button" class="btn btn-outline-secondary btn-sm"
+                    hx-get="/users"
+                    hx-target="#user-table-body"
+                    hx-swap="innerHTML"
+                    title="Refresh (R)">
+                <i class="bi bi-arrow-clockwise"></i>
+                Refresh
+            </button>
+        </div>
+        <div class="toolbar-right">
+            <div class="search-wrapper">
+                <i class="bi bi-search search-icon"></i>
+                <input type="text"
+                       class="form-control search-input"
+                       placeholder="Search users... (/ or Ctrl+K)"
+                       name="search"
+                       hx-get="/users"
+                       hx-target="#user-table-body"
+                       hx-swap="innerHTML"
+                       hx-trigger="keyup changed delay:300ms"
+                       hx-include="[name='search']"
+                       hx-indicator=".search-spinner"
+                       autocomplete="off">
+                <span class="search-spinner htmx-indicator">
+                    <span class="spinner-border spinner-border-sm"></span>
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel-body">
+        <div class="table-responsive">
+            <table class="table table-hover" id="user-table">
+                <thead>
+                    <tr>
+                        {{if eq .ServerRole "master"}}
+                        <th scope="col" class="col-checkbox"></th>
+                        {{end}}
+                        <th scope="col" class="col-num">#</th>
+                        <th scope="col">User</th>
+                        <th scope="col">Status</th>
+                        <th scope="col" class="text-center">Connections</th>
+                        <th scope="col">Expires</th>
+                        <th scope="col">Revoked</th>
+                        <th scope="col" class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="user-table-body"
+                       hx-get="/users"
+                       hx-trigger="load, refresh"
+                       hx-swap="innerHTML">
+                    <!-- User rows loaded via HTMX -->
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 {{if eq (len .Users) 0}}
-<div class="text-center py-4" id="empty-state">
-    <h4>No users have been created yet.</h4>
+<div class="empty-state" id="empty-state">
+    <div class="empty-state-icon">
+        <i class="bi bi-person-plus"></i>
+    </div>
+    <h3>No users yet</h3>
+    <p>Get started by creating your first VPN user</p>
     {{if eq .ServerRole "master"}}
-    <button type="button" class="btn btn-success btn-square mt-2"
+    <button type="button" class="btn btn-primary btn-lg"
             hx-get="/modal/create"
             hx-target="#modal-container">
-        Add user
+        <i class="bi bi-plus-lg"></i>
+        Add Your First User
     </button>
     {{end}}
+</div>
+{{end}}
+
+<!-- Bulk Actions Bar -->
+{{if eq .ServerRole "master"}}
+<div class="bulk-actions-bar" id="bulk-actions-bar">
+    <span class="selected-info">
+        <i class="bi bi-check2-square me-1"></i>
+        <span id="selected-count">0</span> selected
+    </span>
+    <button type="button" class="btn btn-sm btn-warning" onclick="bulkRevoke()">
+        <i class="bi bi-shield-x"></i>
+        Revoke Selected
+    </button>
+    <button type="button" class="btn btn-sm btn-outline-light" onclick="clearSelection()">
+        <i class="bi bi-x-lg"></i>
+        Clear
+    </button>
 </div>
 {{end}}
 {{end}}
