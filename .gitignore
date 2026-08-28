@@ -9,10 +9,6 @@ easyrsa_slave
 ccd
 ccd_master
 ccd_slave
-frontend/node_modules
-
-main-packr.go
-packrd/
 
 # Editor directories and files
 .idea

@@ -2,7 +2,7 @@
 
 ![Version: 0.0.3](https://img.shields.io/badge/Version-0.0.3-informational?style=flat-square) ![AppVersion: 2.0.2](https://img.shields.io/badge/AppVersion-2.0.2-informational?style=flat-square)
 
-Simple web UI to manage OpenVPN users, their certificates & routes in Linux. While backend is written in Go, frontend is based on Vue.js.
+Simple web UI to manage OpenVPN users, their certificates & routes in Linux. It is written in Go, and the frontend is server-rendered HTML (Go templates + htmx) embedded in the binary.
 
 ## Maintainers
 

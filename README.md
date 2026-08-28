@@ -1,6 +1,6 @@
 # ovpn-admin
 
-Simple web UI to manage OpenVPN users, their certificates & routes in Linux. While backend is written in Go, frontend is based on Vue.js.
+Simple web UI to manage OpenVPN users, their certificates & routes in Linux. It is written in Go, and the frontend is server-rendered HTML (Go templates + htmx) embedded in the binary.
 
 ***DISCLAIMER!** This project was created for experienced users (system administrators) and private (e.g., protected by network policies) environments only. Thus, it is not implemented with security in mind (e.g., it doesn't strictly check all parameters passed by users, etc.). It also relies heavily on files and fails if required files aren't available.*
 
@@ -48,8 +48,6 @@ Ready docker images available on [Docker Hub](https://hub.docker.com/r/flant/ovp
 
 Requirements. You need Linux with the following components installed:
 - [golang](https://golang.org/doc/install)
-- [packr2](https://github.com/gobuffalo/packr#installation)
-- [nodejs/npm](https://nodejs.org/en/download/package-manager/)
 
 Commands to execute:
 

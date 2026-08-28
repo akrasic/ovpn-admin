@@ -17,9 +17,3 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-
-  # Dependencies listed in frontend/package.json
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
