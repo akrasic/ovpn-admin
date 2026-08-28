@@ -1602,3 +1602,84 @@ func TestBaseTemplate_ToastDoesNotRenderMessageAsHtml(t *testing.T) {
 		t.Error("showToast should not build the toast with insertAdjacentHTML")
 	}
 }
+
+// =============================================================================
+// Create-path Validation Tests
+// =============================================================================
+
+// exec.Command prevents shell injection but passes arguments through verbatim, so a
+// username beginning with "-" still reaches easyrsa and openvpn-user as a flag.
+func TestValidateUsername_RejectsArgumentInjection(t *testing.T) {
+	for _, name := range []string{"-h", "--help", "--batch", "--db.path", "-", "--user"} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateUsername(name); err == nil {
+				t.Errorf("username %q should be rejected: it would be parsed as a flag", name)
+			}
+		})
+	}
+}
+
+func TestValidateUsername(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		valid    bool
+	}{
+		{"plain", "alice", true},
+		{"dots and dashes", "alice.smith-1", true},
+		{"email style", "alice@example.com", true},
+		{"underscore", "alice_smith", true},
+		{"internal dash", "a-b", true},
+		{"at max length", strings.Repeat("a", usernameMaxLength), true},
+
+		{"empty", "", false},
+		{"over max length", strings.Repeat("a", usernameMaxLength+1), false},
+		{"space", "alice smith", false},
+		{"slash", "alice/../etc", false},
+		{"shell metacharacter", "alice;rm -rf /", false},
+		{"single dot", ".", false},
+		{"double dot", "..", false},
+		{"reserved server", "server", false},
+		{"contains REVOKED", "REVOKED-alice", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateUsername(tt.username)
+			if tt.valid && err != nil {
+				t.Errorf("validateUsername(%q) rejected a valid name: %v", tt.username, err)
+			}
+			if !tt.valid && err == nil {
+				t.Errorf("validateUsername(%q) accepted an invalid name", tt.username)
+			}
+		})
+	}
+}
+
+func TestValidatePassword_Bounds(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		valid    bool
+	}{
+		{"at minimum", strings.Repeat("x", passwordMinLength), true},
+		{"below minimum", strings.Repeat("x", passwordMinLength-1), false},
+		{"at maximum", strings.Repeat("x", passwordMaxLength), true},
+		{"above maximum", strings.Repeat("x", passwordMaxLength+1), false},
+		{"symbols are allowed", `P@ssw0rd!#$%^&*()`, true},
+		{"spaces are allowed", "correct horse battery", true},
+		{"unicode counted as runes", strings.Repeat("é", passwordMinLength), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePassword(tt.password)
+			if tt.valid && err != nil {
+				t.Errorf("validatePassword(len %d) rejected: %v", len(tt.password), err)
+			}
+			if !tt.valid && err == nil {
+				t.Errorf("validatePassword(len %d) accepted", len(tt.password))
+			}
+		})
+	}
+}

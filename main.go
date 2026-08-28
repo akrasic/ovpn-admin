@@ -45,7 +45,9 @@ var staticFS embed.FS
 
 const (
 	usernameRegexp         = `^([a-zA-Z0-9_.\-@])+$`
+	usernameMaxLength      = 64
 	passwordMinLength      = 6
+	passwordMaxLength      = 128
 	certsArchiveFileName   = "certs.tar.gz"
 	ccdArchiveFileName     = "ccd.tar.gz"
 	indexTxtDateLayout     = "060102150405Z"
@@ -1327,19 +1329,48 @@ func checkStaticAddressIsFree(staticAddress string, username string) bool {
 
 func validateUsername(username string) error {
 	var validUsername = regexp.MustCompile(usernameRegexp)
-	if validUsername.MatchString(username) {
-		return nil
-	} else {
+	if !validUsername.MatchString(username) {
 		return userInputError{fmt.Sprintf("Username can only contains %s", usernameRegexp)}
 	}
+
+	// A CN longer than this is not valid in an X.509 subject.
+	if utf8.RuneCountInString(username) > usernameMaxLength {
+		return userInputError{fmt.Sprintf("Username too long, must be at most %d characters", usernameMaxLength)}
+	}
+
+	// easyrsa and openvpn-user read a leading dash as the start of a flag. Commands are
+	// built with exec.Command, which stops shell injection but passes the argument
+	// through verbatim, so argument injection has to be rejected here.
+	if strings.HasPrefix(username, "-") {
+		return userInputError{`Username cannot start with "-"`}
+	}
+
+	if username == "." || username == ".." {
+		return userInputError{`Username cannot be "." or ".."`}
+	}
+
+	// usersList hides the server certificate and anything marked revoked, so a user
+	// with either name would be created but never appear in the UI. "server" would
+	// also be mistaken for the server certificate when reporting expiry.
+	if username == "server" {
+		return userInputError{`"server" is reserved`}
+	}
+	if strings.Contains(username, "REVOKED") {
+		return userInputError{`Username cannot contain "REVOKED"`}
+	}
+
+	return nil
 }
 
 func validatePassword(password string) error {
-	if utf8.RuneCountInString(password) < passwordMinLength {
+	length := utf8.RuneCountInString(password)
+	if length < passwordMinLength {
 		return userInputError{fmt.Sprintf("Password too short, password length must be greater or equal %d", passwordMinLength)}
-	} else {
-		return nil
 	}
+	if length > passwordMaxLength {
+		return userInputError{fmt.Sprintf("Password too long, must be at most %d characters", passwordMaxLength)}
+	}
+	return nil
 }
 
 func checkUserExist(username string) bool {
@@ -1432,15 +1463,15 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string, er
 	oAdmin.createUserMutex.Lock()
 	defer oAdmin.createUserMutex.Unlock()
 
+	if err := validateUsername(username); err != nil {
+		log.Debugf("userCreate: validateUsername(): %s", err.Error())
+		return false, err.Error(), err
+	}
+
 	if checkUserExist(username) {
 		ucErr = fmt.Sprintf("User \"%s\" already exists\n", username)
 		log.Debugf("userCreate: checkUserExist():  %s", ucErr)
 		return false, ucErr, userInputError{ucErr}
-	}
-
-	if err := validateUsername(username); err != nil {
-		log.Debugf("userCreate: validateUsername(): %s", err.Error())
-		return false, err.Error(), err
 	}
 
 	if *authByPassword {
