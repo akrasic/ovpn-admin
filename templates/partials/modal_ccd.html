@@ -129,12 +129,39 @@ function addRoute() {
 
     const tr = document.createElement('tr');
     tr.id = 'route-' + routeIndex;
-    tr.innerHTML = `
-        <td><input type="text" name="routes[${routeIndex}].address" value="${address}" placeholder="10.0.0.0"></td>
-        <td><input type="text" name="routes[${routeIndex}].mask" value="${mask}" placeholder="255.255.255.0"></td>
-        <td><input type="text" name="routes[${routeIndex}].description" value="${description}" placeholder="Description"></td>
-        <td class="text-center"><button type="button" class="btn btn-sm btn-action-danger" onclick="this.closest('tr').remove()" title="Remove route"><i class="bi bi-trash"></i></button></td>
-    `;
+
+    // Built with DOM nodes rather than an innerHTML template: these values come
+    // straight from the form, and a quote in one of them would otherwise break out
+    // of the value attribute.
+    const cell = (field, value, placeholder) => {
+        const td = document.createElement('td');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.name = `routes[${routeIndex}].${field}`;
+        input.value = value;
+        input.placeholder = placeholder;
+        td.append(input);
+        return td;
+    };
+
+    const actions = document.createElement('td');
+    actions.className = 'text-center';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-sm btn-action-danger';
+    remove.title = 'Remove route';
+    remove.addEventListener('click', () => tr.remove());
+    const trash = document.createElement('i');
+    trash.className = 'bi bi-trash';
+    remove.append(trash);
+    actions.append(remove);
+
+    tr.append(
+        cell('address', address, '10.0.0.0'),
+        cell('mask', mask, '255.255.255.0'),
+        cell('description', description, 'Description'),
+        actions,
+    );
     tbody.appendChild(tr);
     routeIndex++;
 

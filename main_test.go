@@ -1,9 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1279,5 +1284,321 @@ func TestUsernamePatternInCreateModal(t *testing.T) {
 	// Verify the fixed regex pattern (hyphen at start of character class)
 	if !strings.Contains(body, `pattern="^[-a-zA-Z0-9_.@]+$"`) {
 		t.Error("Username field should have correct regex pattern with hyphen at start")
+	}
+}
+
+// =============================================================================
+// Username Extraction Tests
+// =============================================================================
+
+func TestExtractUsername(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"user action", "/users/john/password", "john"},
+		{"user delete", "/users/john", "john"},
+		{"modal password", "/modal/password/john", "john"},
+		{"modal rotate", "/modal/rotate/john", "john"},
+		{"modal delete", "/modal/delete/john", "john"},
+		{"modal ccd", "/modal/ccd/john", "john"},
+		{"dotted username", "/modal/password/john.doe@example.com", "john.doe@example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if got := oAdmin.extractUsername(r); got != tt.want {
+				t.Errorf("extractUsername(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// Modal partials are fetched from /modal/{type}/{username}, so the rendered form
+// must target that user. An empty username produces "/users//password", which the
+// mux redirects to "/users/password" and answers 404.
+func TestModalHandlers_RenderUserScopedFormAction(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		handler func(*OvpnAdmin) http.HandlerFunc
+		want    string
+	}{
+		{"password", "/modal/password/john", func(o *OvpnAdmin) http.HandlerFunc { return o.modalPasswordHandler }, `hx-post="/users/john/password"`},
+		{"rotate", "/modal/rotate/john", func(o *OvpnAdmin) http.HandlerFunc { return o.modalRotateHandler }, `hx-post="/users/john/rotate"`},
+		{"delete", "/modal/delete/john", func(o *OvpnAdmin) http.HandlerFunc { return o.modalDeleteHandler }, `hx-delete="/users/john"`},
+		{"ccd", "/modal/ccd/john", func(o *OvpnAdmin) http.HandlerFunc { return o.userShowCcdHandler }, `hx-post="/users/john/ccd"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oAdmin := newTestOvpnAdmin()
+			w := httptest.NewRecorder()
+			tt.handler(oAdmin)(w, httptest.NewRequest(http.MethodGet, tt.path, nil))
+
+			body := w.Body.String()
+			if strings.Contains(body, "/users//") {
+				t.Errorf("%s modal rendered an empty username: form action contains \"/users//\"", tt.name)
+			}
+			if !strings.Contains(body, tt.want) {
+				t.Errorf("%s modal should target %s", tt.name, tt.want)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Shell Injection Regression Tests
+// =============================================================================
+
+// Every value below reached "bash -c" via fmt.Sprintf before commands were switched
+// to exec.Command with argument slices. Each payload creates a marker file if the
+// argument is ever re-interpreted as shell syntax.
+func TestRunCmd_DoesNotInterpretArgumentsAsShell(t *testing.T) {
+	dir := t.TempDir()
+
+	payloads := []struct {
+		name string
+		arg  string
+	}{
+		{"command substitution", "aaaaaa$(touch " + dir + "/pwned_subst)"},
+		{"backticks", "aaaaaa`touch " + dir + "/pwned_tick`"},
+		{"semicolon", "aaaaaa; touch " + dir + "/pwned_semi"},
+		{"quote break", "'; touch " + dir + "/pwned_quote; echo '"},
+		{"pipe", "aaaaaa | touch " + dir + "/pwned_pipe"},
+		{"ampersand", "aaaaaa && touch " + dir + "/pwned_amp"},
+		{"newline", "aaaaaa\ntouch " + dir + "/pwned_nl"},
+	}
+
+	for _, p := range payloads {
+		t.Run(p.name, func(t *testing.T) {
+			// echo is a stand-in for openvpn-user/easyrsa: it must receive the
+			// payload as one inert argument.
+			out, err := runCmd("echo", p.arg)
+			if err != nil {
+				t.Fatalf("runCmd returned error: %v", err)
+			}
+			if strings.TrimRight(out, "\n") != p.arg {
+				t.Errorf("argument was altered in transit:\n got %q\nwant %q", strings.TrimRight(out, "\n"), p.arg)
+			}
+		})
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "pwned_") {
+			t.Errorf("SHELL INJECTION: payload executed and created %s", e.Name())
+		}
+	}
+}
+
+// checkStaticAddressIsFree runs before validateCcd has confirmed the address is a
+// valid IP, so it must not hand the raw value to a shell.
+func TestCheckStaticAddressIsFree_InjectionSafe(t *testing.T) {
+	dir := t.TempDir()
+	marker := dir + "/pwned_ccd"
+
+	origCcd, origBackend := *ccdDir, *storageBackend
+	*ccdDir, *storageBackend = dir, "filesystem"
+	defer func() { *ccdDir, *storageBackend = origCcd, origBackend }()
+
+	if err := os.WriteFile(dir+"/existing", []byte("ifconfig-push 172.16.100.5 255.255.255.0\n"), 0644); err != nil {
+		t.Fatalf("seed ccd: %v", err)
+	}
+
+	checkStaticAddressIsFree("'; touch "+marker+"; echo '", "someuser")
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("SHELL INJECTION: clientAddress payload executed via checkStaticAddressIsFree")
+	}
+}
+
+// The Go reimplementation must keep the semantics of the grep pipeline it replaced.
+func TestCheckStaticAddressIsFree_Semantics(t *testing.T) {
+	dir := t.TempDir()
+	origCcd, origBackend := *ccdDir, *storageBackend
+	*ccdDir, *storageBackend = dir, "filesystem"
+	defer func() { *ccdDir, *storageBackend = origCcd, origBackend }()
+
+	if err := os.WriteFile(dir+"/alice", []byte("ifconfig-push 172.16.100.5 255.255.255.0\n"), 0644); err != nil {
+		t.Fatalf("seed ccd: %v", err)
+	}
+
+	if checkStaticAddressIsFree("172.16.100.5", "bob") {
+		t.Error("address held by alice should not be free for bob")
+	}
+	if !checkStaticAddressIsFree("172.16.100.5", "alice") {
+		t.Error("a user's own address should be free for itself")
+	}
+	if !checkStaticAddressIsFree("172.16.100.99", "bob") {
+		t.Error("unused address should be free")
+	}
+}
+
+// =============================================================================
+// Error Handling Tests
+// =============================================================================
+
+func TestHttpStatusFor(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"validation failure", userInputError{"password too short"}, http.StatusUnprocessableEntity},
+		{"missing user", notFoundError{"ghost"}, http.StatusNotFound},
+		{"wrapped validation", fmt.Errorf("create: %w", userInputError{"bad name"}), http.StatusUnprocessableEntity},
+		{"wrapped not found", fmt.Errorf("delete: %w", notFoundError{"ghost"}), http.StatusNotFound},
+		{"command failure", errors.New("easyrsa: exit status 1"), http.StatusInternalServerError},
+		{"nil", nil, http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := httpStatusFor(tt.err); got != tt.want {
+				t.Errorf("httpStatusFor(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidators_ReturnUserInputError(t *testing.T) {
+	var target userInputError
+
+	if err := validateUsername("bad;rm -rf /"); !errors.As(err, &target) {
+		t.Errorf("validateUsername should return userInputError, got %T", err)
+	}
+	if err := validatePassword("x"); !errors.As(err, &target) {
+		t.Errorf("validatePassword should return userInputError, got %T", err)
+	}
+	if err := validateUsername("good.name"); err != nil {
+		t.Errorf("valid username rejected: %v", err)
+	}
+	if err := validatePassword("longenough"); err != nil {
+		t.Errorf("valid password rejected: %v", err)
+	}
+}
+
+// fWrite used to call log.Fatal (exiting the daemon) and always return nil, which made
+// every "if err != nil" around it dead code.
+func TestFWrite_ReturnsErrorInsteadOfExiting(t *testing.T) {
+	err := fWrite(filepath.Join(t.TempDir(), "no-such-dir", "index.txt"), "data")
+	if err == nil {
+		t.Fatal("fWrite should return an error for an unwritable path")
+	}
+}
+
+// A failed write must not clobber the previous contents: index.txt is the only record
+// of which users exist.
+func TestFWrite_IsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index.txt")
+
+	if err := fWrite(path, "original\n"); err != nil {
+		t.Fatalf("initial write: %v", err)
+	}
+	if err := fWrite(path, "replacement\n"); err != nil {
+		t.Fatalf("replacement write: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "replacement\n" {
+		t.Errorf("content = %q, want %q", got, "replacement\n")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("temporary file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestFirstLine(t *testing.T) {
+	boom := errors.New("exit status 1")
+
+	if got := firstLine("\n\n  easyrsa: cannot read index.txt\nmore\n", boom); got != "easyrsa: cannot read index.txt" {
+		t.Errorf("firstLine picked %q", got)
+	}
+	if got := firstLine("", boom); got != "exit status 1" {
+		t.Errorf("firstLine with empty output = %q, want the error", got)
+	}
+	if got := firstLine("", nil); got != "unknown error" {
+		t.Errorf("firstLine with nothing = %q", got)
+	}
+}
+
+// =============================================================================
+// Toast Payload Escaping Tests
+// =============================================================================
+
+// HX-Trigger used to be built by string concatenation, so a username containing a
+// quote broke out of the JSON string and could inject arbitrary trigger payloads.
+func TestHxToast_EncodesHostileMessages(t *testing.T) {
+	hostile := []string{
+		`a"b`,
+		`", "type": "success"}, "evil": {"x": "`,
+		`back\slash`,
+		"line\nbreak",
+		`<img src=x onerror=alert(1)>`,
+		"tab\there",
+	}
+
+	for _, msg := range hostile {
+		t.Run(msg, func(t *testing.T) {
+			header := hxToast("User "+msg+" deleted", "success")
+
+			var decoded struct {
+				ShowToast struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+				} `json:"showToast"`
+			}
+			if err := json.Unmarshal([]byte(header), &decoded); err != nil {
+				t.Fatalf("header is not valid JSON (%q): %v", header, err)
+			}
+
+			want := "User " + msg + " deleted"
+			if decoded.ShowToast.Message != want {
+				t.Errorf("message round-tripped as %q, want %q", decoded.ShowToast.Message, want)
+			}
+			if decoded.ShowToast.Type != "success" {
+				t.Errorf("type was altered to %q -- payload injection", decoded.ShowToast.Type)
+			}
+			// A raw newline in a header value would be rejected or truncated by net/http.
+			if strings.ContainsAny(header, "\n\r") {
+				t.Errorf("header contains a raw newline: %q", header)
+			}
+		})
+	}
+}
+
+// The toast message must be assigned with textContent. Rendering it as HTML turns every
+// error response into an XSS vector, since responseText is passed straight through.
+func TestBaseTemplate_ToastDoesNotRenderMessageAsHtml(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	oAdmin.indexPageHandler(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := w.Body.String()
+
+	if !strings.Contains(body, "label.textContent = text") {
+		t.Error("showToast should assign the message via textContent")
+	}
+	if strings.Contains(body, "insertAdjacentHTML") {
+		t.Error("showToast should not build the toast with insertAdjacentHTML")
 	}
 }

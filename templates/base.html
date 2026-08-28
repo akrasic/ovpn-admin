@@ -162,23 +162,54 @@
         // =====================================================================
         // Toast notifications
         // =====================================================================
+        const TOAST_STYLES = {
+            success: { bg: 'success', icon: 'check-circle' },
+            error:   { bg: 'danger',  icon: 'exclamation-circle' },
+            warning: { bg: 'warning', icon: 'exclamation-triangle' },
+            warn:    { bg: 'warning', icon: 'exclamation-triangle' },
+            info:    { bg: 'info',    icon: 'info-circle' },
+        };
+        const TOAST_MAX_LENGTH = 500;
+
+        // The message is inserted with textContent, never as HTML. It can carry server
+        // error output and usernames, so treating it as markup would make any error
+        // response an XSS vector.
         function showToast(message, type = 'info') {
-            const toastHtml = `
-                <div class="toast align-items-center text-bg-${type === 'success' ? 'success' : type === 'error' ? 'danger' : type === 'warning' ? 'warning' : 'info'} border-0" role="alert">
-                    <div class="d-flex">
-                        <div class="toast-body">
-                            <i class="bi bi-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : type === 'warning' ? 'exclamation-triangle' : 'info-circle'} me-2"></i>
-                            ${message}
-                        </div>
-                        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-                    </div>
-                </div>
-            `;
-            const container = document.getElementById('toast-container');
-            container.insertAdjacentHTML('beforeend', toastHtml);
-            const toastEl = container.lastElementChild;
-            const toast = new bootstrap.Toast(toastEl, { delay: 4000 });
-            toast.show();
+            const style = TOAST_STYLES[type] || TOAST_STYLES.info;
+
+            let text = String(message ?? '').trim() || 'Request failed';
+            if (text.length > TOAST_MAX_LENGTH) {
+                text = text.slice(0, TOAST_MAX_LENGTH) + '\u2026';
+            }
+
+            const toastEl = document.createElement('div');
+            toastEl.className = `toast align-items-center text-bg-${style.bg} border-0`;
+            toastEl.setAttribute('role', 'alert');
+
+            const row = document.createElement('div');
+            row.className = 'd-flex';
+
+            const body = document.createElement('div');
+            body.className = 'toast-body';
+
+            const icon = document.createElement('i');
+            icon.className = `bi bi-${style.icon} me-2`;
+
+            const label = document.createElement('span');
+            label.textContent = text;
+
+            body.append(icon, label);
+
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'btn-close btn-close-white me-2 m-auto';
+            close.setAttribute('data-bs-dismiss', 'toast');
+
+            row.append(body, close);
+            toastEl.append(row);
+
+            document.getElementById('toast-container').append(toastEl);
+            new bootstrap.Toast(toastEl, { delay: 4000 }).show();
             toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
         }
 

@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -342,15 +343,15 @@ func (oAdmin *OvpnAdmin) userCreateHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	_ = r.ParseForm()
-	userCreated, userCreateStatus := oAdmin.userCreate(r.FormValue("username"), r.FormValue("password"))
+	userCreated, userCreateStatus, userCreateErr := oAdmin.userCreate(r.FormValue("username"), r.FormValue("password"))
 
 	if userCreated {
 		oAdmin.clients = oAdmin.usersList()
-		w.Header().Set("HX-Trigger", `{"showToast": {"message": "`+userCreateStatus+`", "type": "success"}}`)
+		w.Header().Set("HX-Trigger", hxToast(userCreateStatus, "success"))
 		oAdmin.renderUserRows(w, r)
 		return
 	} else {
-		http.Error(w, userCreateStatus, http.StatusUnprocessableEntity)
+		http.Error(w, userCreateStatus, httpStatusFor(userCreateErr))
 	}
 }
 func (oAdmin *OvpnAdmin) userRotateHandler(w http.ResponseWriter, r *http.Request) {
@@ -361,11 +362,11 @@ func (oAdmin *OvpnAdmin) userRotateHandler(w http.ResponseWriter, r *http.Reques
 	}
 	_ = r.ParseForm()
 	username := oAdmin.extractUsername(r)
-	err, _ := oAdmin.userRotate(username, r.FormValue("password"))
+	err, msg := oAdmin.userRotate(username, r.FormValue("password"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, msg, httpStatusFor(err))
 	} else {
-		w.Header().Set("HX-Trigger", `{"showToast": {"message": "Certificates rotated for `+username+`", "type": "success"}}`)
+		w.Header().Set("HX-Trigger", hxToast("Certificates rotated for "+username, "success"))
 		oAdmin.renderUserRows(w, r)
 	}
 }
@@ -378,11 +379,11 @@ func (oAdmin *OvpnAdmin) userDeleteHandler(w http.ResponseWriter, r *http.Reques
 	}
 	_ = r.ParseForm()
 	username := oAdmin.extractUsername(r)
-	err, _ := oAdmin.userDelete(username)
+	err, msg := oAdmin.userDelete(username)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, msg, httpStatusFor(err))
 	} else {
-		w.Header().Set("HX-Trigger", `{"showToast": {"message": "User `+username+` deleted", "type": "success"}}`)
+		w.Header().Set("HX-Trigger", hxToast("User "+username+" deleted", "success"))
 		oAdmin.renderUserRows(w, r)
 	}
 }
@@ -395,11 +396,11 @@ func (oAdmin *OvpnAdmin) userRevokeHandler(w http.ResponseWriter, r *http.Reques
 	}
 	_ = r.ParseForm()
 	username := oAdmin.extractUsername(r)
-	err, _ := oAdmin.userRevoke(username)
+	err, msg := oAdmin.userRevoke(username)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, msg, httpStatusFor(err))
 	} else {
-		w.Header().Set("HX-Trigger", `{"showToast": {"message": "User `+username+` revoked", "type": "warn"}}`)
+		w.Header().Set("HX-Trigger", hxToast("User "+username+" revoked", "warn"))
 		oAdmin.renderUserRows(w, r)
 	}
 }
@@ -412,11 +413,11 @@ func (oAdmin *OvpnAdmin) userUnrevokeHandler(w http.ResponseWriter, r *http.Requ
 	}
 	_ = r.ParseForm()
 	username := oAdmin.extractUsername(r)
-	err, _ := oAdmin.userUnrevoke(username)
+	err, msg := oAdmin.userUnrevoke(username)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, msg, httpStatusFor(err))
 	} else {
-		w.Header().Set("HX-Trigger", `{"showToast": {"message": "User `+username+` unrevoked", "type": "success"}}`)
+		w.Header().Set("HX-Trigger", hxToast("User "+username+" unrevoked", "success"))
 		oAdmin.renderUserRows(w, r)
 	}
 }
@@ -424,10 +425,14 @@ func (oAdmin *OvpnAdmin) userUnrevokeHandler(w http.ResponseWriter, r *http.Requ
 // Helper function to extract username from URL path or form
 func (oAdmin *OvpnAdmin) extractUsername(r *http.Request) string {
 	// Try to get from URL path first (e.g., /users/john/revoke)
-	path := r.URL.Path
+	path := strings.TrimPrefix(r.URL.Path, *listenBaseUrl)
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) >= 2 && parts[0] == "users" {
 		return parts[1]
+	}
+	// Modal partials address the user in the last segment (e.g. /modal/password/john)
+	if len(parts) >= 3 && parts[0] == "modal" {
+		return parts[2]
 	}
 	// Fall back to form value
 	return r.FormValue("username")
@@ -471,9 +476,9 @@ func (oAdmin *OvpnAdmin) userChangePasswordHandler(w http.ResponseWriter, r *htt
 		username := oAdmin.extractUsername(r)
 		err, msg := oAdmin.userChangePassword(username, r.FormValue("password"))
 		if err != nil {
-			http.Error(w, msg, http.StatusInternalServerError)
+			http.Error(w, msg, httpStatusFor(err))
 		} else {
-			w.Header().Set("HX-Trigger", `{"showToast": {"message": "Password changed for `+username+`", "type": "success"}}`)
+			w.Header().Set("HX-Trigger", hxToast("Password changed for "+username, "success"))
 			oAdmin.renderUserRows(w, r)
 		}
 	} else {
@@ -551,7 +556,7 @@ func (oAdmin *OvpnAdmin) userApplyCcdHandler(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if ccdApplied {
-		w.Header().Set("HX-Trigger", `{"showToast": {"message": "Routes updated for `+username+`", "type": "success"}}`)
+		w.Header().Set("HX-Trigger", hxToast("Routes updated for "+username, "success"))
 		err := oAdmin.htmlTemplates.ExecuteTemplate(w, "alert_success", map[string]interface{}{
 			"Message": applyStatus,
 		})
@@ -1289,13 +1294,35 @@ func checkStaticAddressIsFree(staticAddress string, username string) bool {
 		return true
 	}
 
-	o := runBash(fmt.Sprintf("grep -rl ' %[1]s ' %[2]s | grep -vx %[2]s/%[3]s | wc -l", staticAddress, *ccdDir, username))
+	// Previously: grep -rl ' <addr> ' <ccdDir> | grep -vx <ccdDir>/<user> | wc -l
+	// Done in Go so that staticAddress cannot reach a shell: validateCcd calls this
+	// before it has checked that the value is a valid IP address.
+	needle := " " + staticAddress + " "
+	inUse := false
 
-	if strings.TrimSpace(o) == "0" {
-		return true
+	err := filepath.Walk(*ccdDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || path == filepath.Join(*ccdDir, username) {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			log.Warnf("checkStaticAddressIsFree: %v", err)
+			return nil
+		}
+		if strings.Contains(string(content), needle) {
+			log.Warnf("IP %s already assigned in %s", staticAddress, path)
+			inUse = true
+		}
+		return nil
+	})
+	if err != nil {
+		log.Errorf("checkStaticAddressIsFree: walk %s: %v", *ccdDir, err)
 	}
 
-	return false
+	return !inUse
 }
 
 func validateUsername(username string) error {
@@ -1303,13 +1330,13 @@ func validateUsername(username string) error {
 	if validUsername.MatchString(username) {
 		return nil
 	} else {
-		return errors.New(fmt.Sprintf("Username can only contains %s", usernameRegexp))
+		return userInputError{fmt.Sprintf("Username can only contains %s", usernameRegexp)}
 	}
 }
 
 func validatePassword(password string) error {
 	if utf8.RuneCountInString(password) < passwordMinLength {
-		return errors.New(fmt.Sprintf("Password too short, password length must be greater or equal %d", passwordMinLength))
+		return userInputError{fmt.Sprintf("Password too short, password length must be greater or equal %d", passwordMinLength)}
 	} else {
 		return nil
 	}
@@ -1399,7 +1426,7 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 	return users
 }
 
-func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string) {
+func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string, error) {
 	ucErr := fmt.Sprintf("User \"%s\" created", username)
 
 	oAdmin.createUserMutex.Lock()
@@ -1408,68 +1435,176 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string) {
 	if checkUserExist(username) {
 		ucErr = fmt.Sprintf("User \"%s\" already exists\n", username)
 		log.Debugf("userCreate: checkUserExist():  %s", ucErr)
-		return false, ucErr
+		return false, ucErr, userInputError{ucErr}
 	}
 
 	if err := validateUsername(username); err != nil {
 		log.Debugf("userCreate: validateUsername(): %s", err.Error())
-		return false, err.Error()
+		return false, err.Error(), err
 	}
 
 	if *authByPassword {
 		if err := validatePassword(password); err != nil {
 			log.Debugf("userCreate: authByPassword(): %s", err.Error())
-			return false, err.Error()
+			return false, err.Error(), err
 		}
 	}
 
 	if *storageBackend == "kubernetes.secrets" {
-		err := app.easyrsaBuildClient(username)
-		if err != nil {
-			log.Error(err)
+		if err := app.easyrsaBuildClient(username); err != nil {
+			log.Errorf("userCreate: easyrsaBuildClient(%s): %v", username, err)
+			return false, fmt.Sprintf("Could not create certificate for user %q: %s", username, err), err
 		}
 	} else {
-		o := runBash(fmt.Sprintf("cd %s && %s --batch build-client-full %s nopass 1>/dev/null", *easyrsaDirPath, *easyrsaBinPath, username))
-		log.Debug(o)
+		out, err := runCmdDir(*easyrsaDirPath, *easyrsaBinPath, "--batch", "build-client-full", username, "nopass")
+		if err != nil {
+			log.Errorf("userCreate: build-client-full(%s): %v", username, err)
+			return false, fmt.Sprintf("Could not create certificate for user %q: %s", username, firstLine(out, err)), err
+		}
+		log.Debug(out)
 	}
 
 	if *authByPassword {
-		o := runBash(fmt.Sprintf("openvpn-user create --db.path %s --user %s --password %s", *authDatabase, username, password))
-		log.Debug(o)
+		out, err := runCmd("openvpn-user", "create", "--db.path", *authDatabase, "--user", username, "--password", password)
+		if err != nil {
+			// The certificate exists but the account has no password, so it could never
+			// authenticate. Roll the certificate back rather than leave a half-created user.
+			log.Errorf("userCreate: openvpn-user create(%s): %v", username, err)
+			if rbErr, _ := oAdmin.userDelete(username); rbErr != nil {
+				// Best effort: the password record may never have been written, so a
+				// failure to purge it is not necessarily a problem.
+				log.Warnf("userCreate: rollback of %s reported: %v", username, rbErr)
+			}
+			return false, fmt.Sprintf("Could not set password for user %q: %s", username, firstLine(out, err)), err
+		}
+		log.Debug(out)
 	}
 
 	log.Infof("Certificate for user %s issued", username)
 
-	//oAdmin.clients = oAdmin.usersList()
+	return true, ucErr, nil
+}
 
-	return true, ucErr
+// hxToast builds an HX-Trigger header value for the client-side toast. The payload is
+// JSON-encoded rather than concatenated: usernames and command output can contain
+// quotes or backslashes, which would otherwise break out of the JSON string.
+func hxToast(message, level string) string {
+	payload := map[string]interface{}{
+		"showToast": map[string]string{
+			"message": message,
+			"type":    level,
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		log.Errorf("hxToast: %v", err)
+		return ""
+	}
+	return string(encoded)
+}
+
+// Domain error classes, so handlers can choose an HTTP status without matching on
+// error strings.
+
+// userInputError marks a failure caused by what the caller submitted, not a server fault.
+type userInputError struct{ msg string }
+
+func (e userInputError) Error() string { return e.msg }
+
+// notFoundError marks an operation against a user that does not exist.
+type notFoundError struct{ user string }
+
+func (e notFoundError) Error() string { return fmt.Sprintf("user %q not found", e.user) }
+
+// httpStatusFor maps a domain error onto a response status. Anything unrecognised is a
+// server fault, since it means a command or a file operation failed unexpectedly.
+func httpStatusFor(err error) int {
+	var inputErr userInputError
+	var missing notFoundError
+	switch {
+	case errors.As(err, &inputErr):
+		return http.StatusUnprocessableEntity
+	case errors.As(err, &missing):
+		return http.StatusNotFound
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// firstLine reduces command output to something fit for an HTTP response: the first
+// non-empty line of stdout/stderr, falling back to the error itself when the command
+// printed nothing.
+func firstLine(out string, err error) string {
+	for _, line := range strings.Split(out, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return "unknown error"
+}
+
+// easyrsaGenCrl regenerates the CRL. Replaces "cd <dir> && easyrsa gen-crl".
+func easyrsaGenCrl() error {
+	out, err := runCmdDir(*easyrsaDirPath, *easyrsaBinPath, "gen-crl")
+	if err != nil {
+		log.Errorf("easyrsaGenCrl: %v", err)
+		return fmt.Errorf("gen-crl: %s", firstLine(out, err))
+	}
+	log.Debug(out)
+	return nil
+}
+
+// openvpnUserHasRecord reports whether the password database already holds a row for
+// username. Previously: openvpn-user check ... | grep <user> | wc -l, compared to "0".
+// On error the user is assumed to exist, matching the previous behaviour (the old
+// pipeline returned error text, which never equalled "0").
+func openvpnUserHasRecord(username string) bool {
+	out, err := runCmd("openvpn-user", "check", "--db.path", *authDatabase, "--user", username)
+	if err != nil {
+		log.Errorf("openvpnUserHasRecord: %v", err)
+		return true
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, username) {
+			return true
+		}
+	}
+	return false
 }
 
 func (oAdmin *OvpnAdmin) userChangePassword(username, password string) (error, string) {
 
 	if checkUserExist(username) {
-		o := runBash(fmt.Sprintf("openvpn-user check --db.path %[1]s --user %[2]s | grep %[2]s | wc -l", *authDatabase, username))
-		log.Debug(o)
-
 		if err := validatePassword(password); err != nil {
 			log.Warningf("userChangePassword: %s", err.Error())
 			return err, err.Error()
 		}
 
-		if strings.TrimSpace(o) == "0" {
-			o = runBash(fmt.Sprintf("openvpn-user create --db.path %s --user %s --password %s", *authDatabase, username, password))
-			log.Debug(o)
+		if !openvpnUserHasRecord(username) {
+			out, err := runCmd("openvpn-user", "create", "--db.path", *authDatabase, "--user", username, "--password", password)
+			if err != nil {
+				log.Errorf("userChangePassword: openvpn-user create(%s): %v", username, err)
+				return err, fmt.Sprintf("Could not create password record for user %q: %s", username, firstLine(out, err))
+			}
+			log.Debug(out)
 		}
 
-		o = runBash(fmt.Sprintf("openvpn-user change-password --db.path %s --user %s --password %s", *authDatabase, username, password))
-		log.Debug(o)
+		out, err := runCmd("openvpn-user", "change-password", "--db.path", *authDatabase, "--user", username, "--password", password)
+		if err != nil {
+			log.Errorf("userChangePassword: openvpn-user change-password(%s): %v", username, err)
+			return err, fmt.Sprintf("Could not change password for user %q: %s", username, firstLine(out, err))
+		}
+		log.Debug(out)
 
 		log.Infof("Password for user %s was changed", username)
 
 		return nil, "Password changed"
 	}
 
-	return errors.New(fmt.Sprintf("User \"%s\" not found}", username)), fmt.Sprintf("{\"msg\":\"User \"%s\" not found\"}", username)
+	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
 }
 
 func (oAdmin *OvpnAdmin) getUserStatistic(username string) []clientStatus {
@@ -1487,18 +1622,27 @@ func (oAdmin *OvpnAdmin) userRevoke(username string) (error, string) {
 	if checkUserExist(username) {
 		// check certificate valid flag 'V'
 		if *storageBackend == "kubernetes.secrets" {
-			err := app.easyrsaRevoke(username)
-			if err != nil {
-				log.Error(err)
+			if err := app.easyrsaRevoke(username); err != nil {
+				log.Errorf("userRevoke: easyrsaRevoke(%s): %v", username, err)
+				return err, fmt.Sprintf("Could not revoke certificate for user %q: %s", username, err)
 			}
 		} else {
-			o := runBash(fmt.Sprintf("cd %[1]s && echo yes | %[2]s revoke %[3]s 1>/dev/null && %[2]s gen-crl 1>/dev/null", *easyrsaDirPath, *easyrsaBinPath, username))
-			log.Debugln(o)
+			out, err := runCmdInput(*easyrsaDirPath, "yes\n", *easyrsaBinPath, "revoke", username)
+			if err != nil {
+				log.Errorf("userRevoke: revoke(%s): %v", username, err)
+				return err, fmt.Sprintf("Could not revoke certificate for user %q: %s", username, firstLine(out, err))
+			}
+			log.Debugln(out)
+			if err := easyrsaGenCrl(); err != nil {
+				return err, fmt.Sprintf("Certificate for %q was revoked but the CRL could not be regenerated: %s", username, err)
+			}
 		}
 
 		if *authByPassword {
-			o := runBash(fmt.Sprintf("openvpn-user revoke --db.path %s --user %s", *authDatabase, username))
-			log.Debug(o)
+			if out, err := runCmd("openvpn-user", "revoke", "--db.path", *authDatabase, "--user", username); err != nil {
+				log.Errorf("userRevoke: openvpn-user revoke(%s): %v", username, err)
+				return err, fmt.Sprintf("Certificate for %q was revoked but its password record was not: %s", username, firstLine(out, err))
+			}
 		}
 
 		crlFix()
@@ -1515,15 +1659,19 @@ func (oAdmin *OvpnAdmin) userRevoke(username string) (error, string) {
 		return nil, fmt.Sprintf("user \"%s\" revoked", username)
 	}
 	log.Infof("user \"%s\" not found", username)
-	return errors.New(fmt.Sprintf("User \"%s\" not found}", username)), fmt.Sprintf("User \"%s\" not found", username)
+	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
 }
 
 func (oAdmin *OvpnAdmin) userUnrevoke(username string) (error, string) {
+	// Set when the certificate is restored but a dependent step fails, so the caller
+	// learns the account is only partially usable.
+	var unrevokeErr error
+
 	if checkUserExist(username) {
 		if *storageBackend == "kubernetes.secrets" {
-			err := app.easyrsaUnrevoke(username)
-			if err != nil {
-				log.Error(err)
+			if err := app.easyrsaUnrevoke(username); err != nil {
+				log.Errorf("userUnrevoke: easyrsaUnrevoke(%s): %v", username, err)
+				return err, fmt.Sprintf("Could not restore certificate for user %q: %s", username, err)
 			}
 		} else {
 			// check certificate revoked flag 'R'
@@ -1551,16 +1699,20 @@ func (oAdmin *OvpnAdmin) userUnrevoke(username string) (error, string) {
 						if err != nil {
 							log.Error(err)
 						}
-						err = fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt))
-						if err != nil {
-							log.Error(err)
+						if err = fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt)); err != nil {
+							log.Errorf("userUnrevoke: write index.txt: %v", err)
+							return err, fmt.Sprintf("Could not update the certificate index for user %q: %s", username, err)
 						}
 
-						_ = runBash(fmt.Sprintf("cd %s && %s gen-crl 1>/dev/null", *easyrsaDirPath, *easyrsaBinPath))
+						if crlErr := easyrsaGenCrl(); crlErr != nil {
+							log.Errorf("userUnrevoke: %v", crlErr)
+						}
 
 						if *authByPassword {
-							o := runBash(fmt.Sprintf("openvpn-user restore --db.path %s --user %s", *authDatabase, username))
-							log.Debug(o)
+							if out, rErr := runCmd("openvpn-user", "restore", "--db.path", *authDatabase, "--user", username); rErr != nil {
+								log.Errorf("userUnrevoke: openvpn-user restore(%s): %v", username, rErr)
+								unrevokeErr = fmt.Errorf("certificate for %q was restored, but its password record was not: %s", username, firstLine(out, rErr))
+							}
 						}
 
 						crlFix()
@@ -1569,17 +1721,19 @@ func (oAdmin *OvpnAdmin) userUnrevoke(username string) (error, string) {
 					}
 				}
 			}
-			err := fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt))
-			if err != nil {
-				log.Error(err)
+			if err := fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt)); err != nil {
+				log.Errorf("userUnrevoke: write index.txt: %v", err)
+				return err, fmt.Sprintf("Could not update the certificate index for user %q: %s", username, err)
 			}
-			//fmt.Print(renderIndexTxt(usersFromIndexTxt))
 		}
 		crlFix()
 		oAdmin.clients = oAdmin.usersList()
-		return nil, fmt.Sprintf("{\"msg\":\"User %s successfully unrevoked\"}", username)
+		if unrevokeErr != nil {
+			return unrevokeErr, fmt.Sprintf("User %q partially unrevoked", username)
+		}
+		return nil, fmt.Sprintf("User %q successfully unrevoked", username)
 	}
-	return errors.New(fmt.Sprintf("user \"%s\" not found", username)), fmt.Sprintf("{\"msg\":\"User \"%s\" not found\"}", username)
+	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
 }
 
 func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string) {
@@ -1611,11 +1765,10 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 			}
 
 			if *authByPassword {
-				o := runBash(fmt.Sprintf("openvpn-user delete --force --db.path %s --user %s", *authDatabase, username))
-				log.Debug(o)
+				logCmd("openvpn-user", "delete", "--force", "--db.path", *authDatabase, "--user", username)
 			}
 
-			userCreated, userCreateMessage := oAdmin.userCreate(username, newPassword)
+			userCreated, userCreateMessage, userCreateErr := oAdmin.userCreate(username, newPassword)
 			if !userCreated {
 				usersFromIndexTxt = indexTxtParser(fRead(*indexTxtPath))
 				for i := range usersFromIndexTxt {
@@ -1628,7 +1781,9 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 				if err != nil {
 					log.Error(err)
 				}
-				return errors.New(fmt.Sprintf("error rotaing user due:  %s", userCreateMessage)), userCreateMessage
+				// Propagated so a validation failure during rotate is still classified
+				// as caller error rather than a server fault.
+				return fmt.Errorf("error rotating user %q: %w", username, userCreateErr), userCreateMessage
 			}
 
 			usersFromIndexTxt = indexTxtParser(fRead(*indexTxtPath))
@@ -1642,18 +1797,21 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 			}
 			usersFromIndexTxt[oldUserIndex], usersFromIndexTxt[newUserIndex] = usersFromIndexTxt[newUserIndex], usersFromIndexTxt[oldUserIndex]
 
-			err = fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt))
-			if err != nil {
-				log.Error(err)
+			if err = fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt)); err != nil {
+				log.Errorf("userRotate: write index.txt: %v", err)
+				return err, fmt.Sprintf("Could not update the certificate index for user %q: %s", username, err)
 			}
 
-			_ = runBash(fmt.Sprintf("cd %s && %s gen-crl 1>/dev/null", *easyrsaDirPath, *easyrsaBinPath))
+			if err := easyrsaGenCrl(); err != nil {
+				return fmt.Errorf("user %q was rotated but the CRL could not be regenerated: %s", username, err),
+					fmt.Sprintf("User %q rotated, CRL not regenerated", username)
+			}
 		}
 		crlFix()
 		oAdmin.clients = oAdmin.usersList()
-		return nil, fmt.Sprintf("{\"msg\":\"User %s successfully rotated\"}", username)
+		return nil, fmt.Sprintf("User %q successfully rotated", username)
 	}
-	return errors.New(fmt.Sprintf("user \"%s\" not found", username)), fmt.Sprintf("{\"msg\":\"User \"%s\" not found\"}", username)
+	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
 }
 
 func (oAdmin *OvpnAdmin) userDelete(username string) (error, string) {
@@ -1672,20 +1830,31 @@ func (oAdmin *OvpnAdmin) userDelete(username string) (error, string) {
 					break
 				}
 			}
+			// Write the index first: it is the record that decides whether the user
+			// exists. If it fails nothing else should be touched.
+			if err := fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt)); err != nil {
+				log.Errorf("userDelete: write index.txt: %v", err)
+				return err, fmt.Sprintf("Could not update the certificate index for user %q: %s", username, err)
+			}
+
 			if *authByPassword {
-				_ = runBash(fmt.Sprintf("openvpn-user delete --force --db.path %s --user %s", *authDatabase, username))
+				if out, err := runCmd("openvpn-user", "delete", "--force", "--db.path", *authDatabase, "--user", username); err != nil {
+					log.Errorf("userDelete: openvpn-user delete(%s): %v", username, err)
+					return fmt.Errorf("user %q was removed from the certificate index, but its password record could not be deleted: %s", username, firstLine(out, err)),
+						fmt.Sprintf("User %q partially deleted", username)
+				}
 			}
-			err := fWrite(*indexTxtPath, renderIndexTxt(usersFromIndexTxt))
-			if err != nil {
-				log.Error(err)
+
+			if err := easyrsaGenCrl(); err != nil {
+				return fmt.Errorf("user %q was deleted but the CRL could not be regenerated: %s", username, err),
+					fmt.Sprintf("User %q deleted, CRL not regenerated", username)
 			}
-			_ = runBash(fmt.Sprintf("cd %s && %s gen-crl 1>/dev/null ", *easyrsaDirPath, *easyrsaBinPath))
 		}
 		crlFix()
 		oAdmin.clients = oAdmin.usersList()
-		return nil, fmt.Sprintf("{\"msg\":\"User %s successfully deleted\"}", username)
+		return nil, fmt.Sprintf("User %q successfully deleted", username)
 	}
-	return errors.New(fmt.Sprintf("User \"%s\" not found}", username)), fmt.Sprintf("{\"msg\":\"User \"%s\" not found\"}", username)
+	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
 }
 
 func (oAdmin *OvpnAdmin) mgmtRead(conn net.Conn) string {
@@ -1947,8 +2116,13 @@ func unArchiveCcd() {
 
 func ovpnUserInitDb() {
 	if fi, err := os.Stat(*authDatabase); errors.Is(err, os.ErrNotExist) || fi.Size() == 0 {
-		i := runBash(fmt.Sprintf("openvpn-user --db.path %[1]s db-init && openvpn-user --db.path %[1]s db-migrate", *authDatabase))
-		log.Debug(i)
+		if out, err := runCmd("openvpn-user", "--db.path", *authDatabase, "db-init"); err != nil {
+			log.Errorf("ovpnUserInitDb: db-init: %v", err)
+			return
+		} else {
+			log.Debug(out)
+		}
+		logCmd("openvpn-user", "--db.path", *authDatabase, "db-migrate")
 	}
 }
 

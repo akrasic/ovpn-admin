@@ -32,14 +32,47 @@ func parseDateToUnix(layout, datetime string) int64 {
 	return parseDate(layout, datetime).Unix()
 }
 
-func runBash(script string) string {
-	log.Debugln(script)
-	cmd := exec.Command("bash", "-c", script)
-	stdout, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Sprint(err) + " : " + string(stdout)
+// runCmd executes a command directly, without a shell. Arguments are passed as a
+// slice so that user-supplied values (usernames, passwords, addresses) can never be
+// interpreted as shell syntax.
+//
+// Nothing here may be routed through "bash -c": every argument below originates from
+// an HTTP request.
+func runCmd(name string, args ...string) (string, error) {
+	return runCmdDir("", name, args...)
+}
+
+// runCmdDir is runCmd with a working directory, replacing "cd <dir> && ..." wrappers.
+func runCmdDir(dir, name string, args ...string) (string, error) {
+	return runCmdInput(dir, "", name, args...)
+}
+
+// runCmdInput is runCmdDir with data written to the command's stdin, replacing
+// "echo yes | ..." wrappers.
+func runCmdInput(dir, stdin, name string, args ...string) (string, error) {
+	log.Debugln(name, args)
+	cmd := exec.Command(name, args...)
+	if dir != "" {
+		cmd.Dir = dir
 	}
-	return string(stdout)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%s: %w: %s", name, err, string(out))
+	}
+	return string(out), nil
+}
+
+// logCmd runs a command and logs the outcome, for call sites that historically
+// discarded the result. Errors are surfaced at a visible level rather than swallowed.
+func logCmd(name string, args ...string) {
+	if out, err := runCmdDir("", name, args...); err != nil {
+		log.Errorf("%s failed: %v", name, err)
+	} else {
+		log.Debug(out)
+	}
 }
 
 func fExist(path string) bool {
@@ -48,7 +81,8 @@ func fExist(path string) bool {
 	if os.IsNotExist(err) {
 		return false
 	} else if err != nil {
-		log.Fatalf("fExist: %s", err)
+		// Previously log.Fatalf, which exited the daemon on a transient stat error.
+		log.Errorf("fExist: %s", err)
 		return false
 	}
 
@@ -78,18 +112,50 @@ func fCreate(path string) error {
 	return nil
 }
 
+// fWrite writes content to path atomically: a temporary file in the same directory is
+// written and fsynced, then renamed over the target. A failed or interrupted write
+// therefore cannot leave a truncated file behind -- index.txt is the source of truth
+// for every user, so a partial write there loses accounts.
 func fWrite(path, content string) error {
-	err := ioutil.WriteFile(path, []byte(content), 0644)
+	dir := filepath.Dir(path)
+
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp")
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("fWrite: create temp in %s: %w", dir, err)
 	}
+	tmpName := tmp.Name()
+
+	defer func() {
+		// No-op once the rename below has succeeded.
+		if _, statErr := os.Stat(tmpName); statErr == nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err = tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("fWrite: write %s: %w", tmpName, err)
+	}
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("fWrite: sync %s: %w", tmpName, err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("fWrite: close %s: %w", tmpName, err)
+	}
+	if err = os.Chmod(tmpName, 0644); err != nil {
+		return fmt.Errorf("fWrite: chmod %s: %w", tmpName, err)
+	}
+	if err = os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("fWrite: rename to %s: %w", path, err)
+	}
+
 	return nil
 }
 
 func fDelete(path string) error {
-	err := os.Remove(path)
-	if err != nil {
-		log.Fatal(err)
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("fDelete: %s: %w", path, err)
 	}
 	return nil
 }
