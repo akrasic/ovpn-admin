@@ -75,9 +75,11 @@ const (
 	// trickling data cannot hold a handler forever.
 	mgmtReadTimeout        = 3 * time.Second
 	mgmtReadOverallTimeout = 30 * time.Second
-	// authLogParseLimit bounds how many login-log entries one request parses;
-	// the file itself is size-capped by auth.sh's rotation.
-	authLogParseLimit = 2000
+	// authLogParseLimit bounds how many login-log entries one request parses.
+	// Sized for a 60-90 user fleet where reconnects can write a few thousand
+	// lines a day: deep enough that a quiet user's last login stays visible,
+	// while both size-capped generations together stay a few-millisecond parse.
+	authLogParseLimit = 50000
 )
 
 var (
@@ -2093,18 +2095,26 @@ type authAttempt struct {
 	Source     string // ip:port the attempt came from
 }
 
-// parseAuthLog reads the attempt log newest first, capped at limit entries.
+// parseAuthLog reads the attempt log newest first, capped at limit entries. The
+// rotated generation (auth.log.1) is read too, so history does not collapse to
+// near-nothing right after auth.sh rolls the file over.
 // Lines that do not parse are skipped: the file is written by a shell script on
 // another container, so a torn or foreign line must never take the page down.
 // A missing file is normal - password auth may be off, or nobody has ever
 // tried to log in.
 func parseAuthLog(path string, limit int) []authAttempt {
-	// Checked rather than letting fRead warn: no log is the normal state when
-	// password auth is off or nobody has connected yet, and this runs per render.
-	if path == "" || !fExist(path) {
+	if path == "" {
 		return nil
 	}
-	content := fRead(path)
+	// Older generation first so the combined slice runs oldest to newest.
+	// Checked rather than letting fRead warn: a missing file is the normal
+	// state here, and this runs per render.
+	var content string
+	for _, p := range []string{path + ".1", path} {
+		if fExist(p) {
+			content += fRead(p)
+		}
+	}
 	if content == "" {
 		return nil
 	}

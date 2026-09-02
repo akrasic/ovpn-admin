@@ -2211,6 +2211,23 @@ func TestParseAuthLog_NewestFirstSkippingMalformedLines(t *testing.T) {
 	}
 }
 
+func TestParseAuthLog_IncludesRotatedGeneration(t *testing.T) {
+	writeAuthLog(t, "2026-09-02T10:00:00Z\tsuccess\talice\talice\t10.1.2.3:2\n")
+	rotated := "2026-09-01T10:00:00Z\tsuccess\tbob\tbob\t10.1.2.4:1\n"
+	if err := os.WriteFile(*authLogPath+".1", []byte(rotated), 0o600); err != nil {
+		t.Fatalf("writing rotated log: %v", err)
+	}
+
+	attempts := parseAuthLog(*authLogPath, 100)
+	if len(attempts) != 2 {
+		t.Fatalf("expected the rotated generation to be read too, got %d attempts", len(attempts))
+	}
+	// Newest first across both generations: current file, then rotated.
+	if attempts[0].Username != "alice" || attempts[1].Username != "bob" {
+		t.Errorf("expected [alice bob] newest first across generations, got [%s %s]", attempts[0].Username, attempts[1].Username)
+	}
+}
+
 func TestAuthLoginStats_FailuresResetOnSuccess(t *testing.T) {
 	writeAuthLog(t,
 		"2026-09-01T10:00:00Z\tbad-password\talice\talice\t10.1.2.3:1\n"+
