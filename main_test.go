@@ -1974,6 +1974,115 @@ func TestUserAccountStatus(t *testing.T) {
 }
 
 // =============================================================================
+// Management interface Tests
+// =============================================================================
+
+func TestMgmtConnectedUsersParser_TruncatedReplyDoesNotPanic(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	// A reply cut off by the read deadline ends mid-line. Truncated lines in both
+	// the client list and the routing table used to index past the end of the
+	// split and panic - fatally, when parsing ran in the updateState goroutine.
+	truncated := "OpenVPN CLIENT LIST\n" +
+		"Updated,2026-09-02 10:00:00\n" +
+		"Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since\n" +
+		"alice,1.2.3.4:5555,100,200,2026-09-02 09:00:00\n" +
+		"bob,5.6.7.8:1194,300,400,2026-09-02 08:00:00\n" +
+		"charlie,9.9.9"
+
+	users := oAdmin.mgmtConnectedUsersParser(truncated, "server1")
+	if len(users) != 2 {
+		t.Fatalf("expected the two complete lines to parse and the truncated one to be skipped, got %d users", len(users))
+	}
+	if users[0].CommonName != "alice" || users[1].CommonName != "bob" {
+		t.Errorf("parsed the wrong users: %+v", users)
+	}
+
+	withRoutes := "Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since\n" +
+		"alice,1.2.3.4:5555,100,200,2026-09-02 09:00:00\n" +
+		"ROUTING TABLE\n" +
+		"Virtual Address,Common Name,Real Address,Last Ref\n" +
+		"10.8.0.2,alice,1.2.3.4:5555,2026-09-02 09:59:59\n" +
+		"10.8.0.3,al"
+
+	users = oAdmin.mgmtConnectedUsersParser(withRoutes, "server1")
+	if len(users) != 1 {
+		t.Fatalf("expected one user, got %d", len(users))
+	}
+	if users[0].VirtualAddress != "10.8.0.2" {
+		t.Errorf("the complete route line should still be applied, got %q", users[0].VirtualAddress)
+	}
+}
+
+func TestMgmtRead_AssemblesReplyArrivingInChunks(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	reply := []string{
+		"Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since\n",
+		"alice,1.2.3.4:5555,100,200,2026-09-02 09:00:00\n",
+		"ROUTING TABLE\nGLOBAL STATS\nEND\n",
+	}
+	go func() {
+		defer server.Close()
+		for _, chunk := range reply {
+			// The deadline must survive a reply that streams in slowly: it is
+			// pushed forward on every read, so only an idle gap of
+			// mgmtReadTimeout ends the read early.
+			time.Sleep(20 * time.Millisecond)
+			if _, err := server.Write([]byte(chunk)); err != nil {
+				return
+			}
+		}
+	}()
+
+	out := oAdmin.mgmtRead(client)
+	if out != strings.Join(reply, "") {
+		t.Errorf("mgmtRead should assemble the full reply, got %q", out)
+	}
+}
+
+// =============================================================================
+// Client state synchronization Tests
+// =============================================================================
+
+// TestClientsAccessors_ConcurrentUse hammers the accessors from concurrent
+// goroutines the way handlers, hx refreshes and the updateState goroutine do.
+// Run with -race (needs cgo) to make it meaningful as a race detector target;
+// without it, it still exercises the lock paths.
+func TestClientsAccessors_ConcurrentUse(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 1000; i++ {
+				oAdmin.setClients([]OpenvpnClient{{Identity: "alice"}})
+				oAdmin.setActiveClients([]clientStatus{{CommonName: "alice"}})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 1000; i++ {
+				for range oAdmin.getClients() {
+				}
+				for range oAdmin.getActiveClients() {
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if clients := oAdmin.getClients(); len(clients) != 1 || clients[0].Identity != "alice" {
+		t.Errorf("unexpected final clients state: %+v", clients)
+	}
+}
+
+// =============================================================================
 // PKI file archiving Tests
 // =============================================================================
 

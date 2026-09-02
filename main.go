@@ -69,7 +69,11 @@ const (
 	// sentinel in the reply, so a socket that accepts and then says nothing useful would
 	// otherwise block the handler for ever.
 	mgmtDialTimeout = 3 * time.Second
-	mgmtReadTimeout = 3 * time.Second
+	// mgmtReadTimeout is an idle limit between reads, not a cap on the whole
+	// reply; mgmtReadOverallTimeout is the cap, so a socket that keeps
+	// trickling data cannot hold a handler forever.
+	mgmtReadTimeout        = 3 * time.Second
+	mgmtReadOverallTimeout = 30 * time.Second
 )
 
 var (
@@ -209,12 +213,17 @@ type OvpnAdmin struct {
 	masterSyncToken        string
 	clients                []OpenvpnClient
 	activeClients          []clientStatus
-	promRegistry           *prometheus.Registry
-	mgmtInterfaces         map[string]string
-	modules                []string
-	mgmtStatusTimeFormat   string
-	createUserMutex        *sync.Mutex
-	htmlTemplates          *template.Template
+	// clientsMutex guards clients and activeClients, which are written by request
+	// handlers and by the background sync goroutine concurrently. Both slices are
+	// replaced wholesale and never mutated in place, so handing out the current
+	// reference under RLock is safe. Access them through the accessors below.
+	clientsMutex         sync.RWMutex
+	promRegistry         *prometheus.Registry
+	mgmtInterfaces       map[string]string
+	modules              []string
+	mgmtStatusTimeFormat string
+	createUserMutex      *sync.Mutex
+	htmlTemplates        *template.Template
 }
 
 type OpenvpnServer struct {
@@ -292,7 +301,7 @@ func (oAdmin *OvpnAdmin) userListHandler(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			log.Errorln(err)
 		}
-		oAdmin.clients = oAdmin.usersList()
+		oAdmin.setClients(oAdmin.usersList())
 	}
 
 	users := oAdmin.visibleUsers(r)
@@ -327,7 +336,7 @@ func (oAdmin *OvpnAdmin) userCreateHandler(w http.ResponseWriter, r *http.Reques
 	userCreated, userCreateStatus, userCreateErr := oAdmin.userCreate(r.FormValue("username"), r.FormValue("password"))
 
 	if userCreated {
-		oAdmin.clients = oAdmin.usersList()
+		oAdmin.setClients(oAdmin.usersList())
 		w.Header().Set("HX-Trigger", hxToast(userCreateStatus, "success"))
 		oAdmin.renderUserRows(w, r)
 		return
@@ -424,7 +433,7 @@ func (oAdmin *OvpnAdmin) extractUsername(r *http.Request) string {
 // follows a mutation go through here, so an action taken while a filter is active does not
 // reset the table to every user.
 func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
-	users := oAdmin.clients
+	users := oAdmin.getClients()
 
 	hideRevoked := false
 	if cookie, err := r.Cookie("hideRevoked"); err == nil {
@@ -484,8 +493,8 @@ func (oAdmin *OvpnAdmin) userAccountStatus(username string) string {
 func (oAdmin *OvpnAdmin) renderUserRows(w http.ResponseWriter, r *http.Request) {
 	// usersList reads activeClients to decide who is online, so refresh that first or the
 	// rows carry certificate data from disk next to connection data from up to 28s ago.
-	oAdmin.activeClients = oAdmin.mgmtGetActiveClients()
-	oAdmin.clients = oAdmin.usersList()
+	oAdmin.setActiveClients(oAdmin.mgmtGetActiveClients())
+	oAdmin.setClients(oAdmin.usersList())
 
 	users := oAdmin.visibleUsers(r)
 
@@ -620,7 +629,7 @@ func (oAdmin *OvpnAdmin) calculateStats() DashboardStats {
 	now := time.Now()
 	thirtyDaysFromNow := now.AddDate(0, 0, 30)
 
-	for _, client := range oAdmin.clients {
+	for _, client := range oAdmin.getClients() {
 		stats.TotalUsers++
 		stats.ActiveConnections += client.Connections
 
@@ -651,8 +660,8 @@ func (oAdmin *OvpnAdmin) statsHandler(w http.ResponseWriter, r *http.Request) {
 			log.Errorln(err)
 		}
 	}
-	oAdmin.activeClients = oAdmin.mgmtGetActiveClients()
-	oAdmin.clients = oAdmin.usersList()
+	oAdmin.setActiveClients(oAdmin.mgmtGetActiveClients())
+	oAdmin.setClients(oAdmin.usersList())
 
 	stats := oAdmin.calculateStats()
 
@@ -677,7 +686,7 @@ func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "base", map[string]interface{}{
-		"Users":       oAdmin.clients,
+		"Users":       oAdmin.getClients(),
 		"ServerRole":  oAdmin.role,
 		"Modules":     oAdmin.modules,
 		"HideRevoked": hideRevoked,
@@ -1039,9 +1048,33 @@ func (oAdmin *OvpnAdmin) registerMetrics() {
 	oAdmin.promRegistry.MustRegister(ovpnClientBytesSent)
 }
 
+func (oAdmin *OvpnAdmin) getClients() []OpenvpnClient {
+	oAdmin.clientsMutex.RLock()
+	defer oAdmin.clientsMutex.RUnlock()
+	return oAdmin.clients
+}
+
+func (oAdmin *OvpnAdmin) setClients(clients []OpenvpnClient) {
+	oAdmin.clientsMutex.Lock()
+	defer oAdmin.clientsMutex.Unlock()
+	oAdmin.clients = clients
+}
+
+func (oAdmin *OvpnAdmin) getActiveClients() []clientStatus {
+	oAdmin.clientsMutex.RLock()
+	defer oAdmin.clientsMutex.RUnlock()
+	return oAdmin.activeClients
+}
+
+func (oAdmin *OvpnAdmin) setActiveClients(activeClients []clientStatus) {
+	oAdmin.clientsMutex.Lock()
+	defer oAdmin.clientsMutex.Unlock()
+	oAdmin.activeClients = activeClients
+}
+
 func (oAdmin *OvpnAdmin) setState() {
-	oAdmin.activeClients = oAdmin.mgmtGetActiveClients()
-	oAdmin.clients = oAdmin.usersList()
+	oAdmin.setActiveClients(oAdmin.mgmtGetActiveClients())
+	oAdmin.setClients(oAdmin.usersList())
 
 	ovpnServerCaCertExpire.Set(float64((getOvpnCaCertExpireDate().Unix() - time.Now().Unix()) / 3600 / 24))
 }
@@ -1054,7 +1087,16 @@ func (oAdmin *OvpnAdmin) updateState() {
 		ovpnClientConnectionFrom.Reset()
 		ovpnClientConnectionInfo.Reset()
 		ovpnClientCertificateExpire.Reset()
-		go oAdmin.setState()
+		go func() {
+			// A panic here would take down the whole daemon, and nothing
+			// restarts this goroutine. Log it and let the next tick retry.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("updateState: background sync panicked: %v", r)
+				}
+			}()
+			oAdmin.setState()
+		}()
 	}
 }
 
@@ -1423,6 +1465,7 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 	totalActiveConnections := 0
 	apochNow := time.Now().Unix()
 	thirtyDaysFromNow := time.Now().AddDate(0, 0, 30).Unix()
+	activeClients := oAdmin.getActiveClients()
 
 	for _, line := range indexTxtParser(fRead(*indexTxtPath)) {
 		if line.Identity != "server" && !strings.Contains(line.Identity, "REVOKED") {
@@ -1455,7 +1498,7 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 
 			ovpnClient.Connections = 0
 
-			userConnected, userConnectedTo := isUserConnected(line.Identity, oAdmin.activeClients)
+			userConnected, userConnectedTo := isUserConnected(line.Identity, activeClients)
 			if userConnected {
 				ovpnClient.ConnectionStatus = "Connected"
 				for range userConnectedTo {
@@ -1686,7 +1729,7 @@ func (oAdmin *OvpnAdmin) userChangePassword(username, password string) (error, s
 
 func (oAdmin *OvpnAdmin) getUserStatistic(username string) []clientStatus {
 	var userStatistic []clientStatus
-	for _, u := range oAdmin.activeClients {
+	for _, u := range oAdmin.getActiveClients() {
 		if u.CommonName == username {
 			userStatistic = append(userStatistic, u)
 		}
@@ -1723,7 +1766,7 @@ func (oAdmin *OvpnAdmin) userRevoke(username string) (error, string) {
 		}
 
 		crlFix()
-		userConnected, userConnectedTo := isUserConnected(username, oAdmin.activeClients)
+		userConnected, userConnectedTo := isUserConnected(username, oAdmin.getActiveClients())
 		log.Tracef("User %s connected: %t", username, userConnected)
 		if userConnected {
 			for _, connection := range userConnectedTo {
@@ -1804,7 +1847,7 @@ func (oAdmin *OvpnAdmin) userUnrevoke(username string) (error, string) {
 			}
 		}
 		crlFix()
-		oAdmin.clients = oAdmin.usersList()
+		oAdmin.setClients(oAdmin.usersList())
 		if unrevokeErr != nil {
 			return unrevokeErr, fmt.Sprintf("User %q partially unrevoked", username)
 		}
@@ -1891,7 +1934,7 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 			}
 		}
 		crlFix()
-		oAdmin.clients = oAdmin.usersList()
+		oAdmin.setClients(oAdmin.usersList())
 		return nil, fmt.Sprintf("User %q successfully rotated", username)
 	}
 	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
@@ -2030,29 +2073,40 @@ func (oAdmin *OvpnAdmin) userDelete(username string) (error, string) {
 			}
 		}
 		crlFix()
-		oAdmin.clients = oAdmin.usersList()
+		oAdmin.setClients(oAdmin.usersList())
 		return nil, fmt.Sprintf("User %q successfully deleted", username)
 	}
 	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
 }
 
+// mgmtRead drains one management-interface reply. The deadline moves forward
+// before every read, so a large status report that streams in over several
+// seconds is not cut off mid-line; the read ends early only when the socket
+// goes quiet for mgmtReadTimeout or the whole reply exceeds
+// mgmtReadOverallTimeout. An early end is logged, because a truncated status
+// reply understates who is connected.
 func (oAdmin *OvpnAdmin) mgmtRead(conn net.Conn) string {
 	recvData := make([]byte, 32768)
 	var out string
-	var n int
-	var err error
-	if err := conn.SetReadDeadline(time.Now().Add(mgmtReadTimeout)); err != nil {
-		log.Warnf("mgmtRead: could not set read deadline: %v", err)
-	}
+	overall := time.Now().Add(mgmtReadOverallTimeout)
 	for {
-		n, err = conn.Read(recvData)
-		if n <= 0 || err != nil {
-			break
-		} else {
+		idle := time.Now().Add(mgmtReadTimeout)
+		if idle.After(overall) {
+			idle = overall
+		}
+		if err := conn.SetReadDeadline(idle); err != nil {
+			log.Warnf("mgmtRead: could not set read deadline: %v", err)
+		}
+		n, err := conn.Read(recvData)
+		if n > 0 {
 			out += string(recvData[:n])
 			if strings.Contains(out, "type 'help' for more info") || strings.Contains(out, "END") || strings.Contains(out, "SUCCESS:") || strings.Contains(out, "ERROR:") {
 				break
 			}
+		}
+		if err != nil || n <= 0 {
+			log.Warnf("mgmtRead: reply from %s ended after %d bytes without a recognised terminator: %v", conn.RemoteAddr(), len(out), err)
+			break
 		}
 	}
 	return out
@@ -2083,6 +2137,13 @@ func (oAdmin *OvpnAdmin) mgmtConnectedUsersParser(text, serverName string) []cli
 		}
 		if isClientList {
 			user := strings.Split(txt, ",")
+			// A reply can end mid-line when mgmtRead hits its deadline, and this
+			// parser also runs in the background updateState goroutine, where an
+			// index-out-of-range panic would kill the whole process.
+			if len(user) < 5 {
+				log.Warnf("mgmtConnectedUsersParser: skipping malformed client line from %s: %q", serverName, txt)
+				continue
+			}
 
 			userName := user[0]
 			userAddress := user[1]
@@ -2100,6 +2161,10 @@ func (oAdmin *OvpnAdmin) mgmtConnectedUsersParser(text, serverName string) []cli
 		}
 		if isRouteTable {
 			user := strings.Split(txt, ",")
+			if len(user) < 4 {
+				log.Warnf("mgmtConnectedUsersParser: skipping malformed route line from %s: %q", serverName, txt)
+				continue
+			}
 			for i := range u {
 				if u[i].CommonName == user[1] {
 					u[i].VirtualAddress = user[0]
