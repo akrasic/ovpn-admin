@@ -22,7 +22,11 @@ PATH="$PATH:/usr/local/bin"
 set -eu
 
 AUTH_DB="${AUTH_DB:-/etc/openvpn/easyrsa/pki/users.db}"
-AUTH_LOG="${AUTH_LOG:-/etc/openvpn/easyrsa/auth.log}"
+# The log lives in a subdirectory of its own: openvpn drops privileges (user
+# nobody), so this script cannot write into the root-owned easyrsa dir itself.
+# The entrypoint creates log/ owned by that user; rotation needs the directory
+# writable too, not just the file.
+AUTH_LOG="${AUTH_LOG:-/etc/openvpn/easyrsa/log/auth.log}"
 AUTH_LOG_MAX_BYTES="${AUTH_LOG_MAX_BYTES:-5242880}"
 
 auth_usr=''
@@ -40,7 +44,10 @@ log_attempt() {
     printf '%s\t%s\t%s\t%s\t%s\n' \
       "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$safe_usr" "$safe_cn" \
       "${untrusted_ip:-}:${untrusted_port:-}" >> "$AUTH_LOG"
-  } 2>/dev/null || true
+  } 2>/dev/null || echo "auth: could not record attempt in $AUTH_LOG" >&2
+  # Best effort either way: a full disk or bad permissions lands one line in the
+  # openvpn daemon log instead of silently losing the trail - and never blocks
+  # the authentication itself.
 }
 
 creds_file="${1:-}"

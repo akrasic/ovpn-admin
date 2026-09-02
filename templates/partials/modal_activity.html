@@ -54,10 +54,8 @@
                     <i class="bi bi-clock-history"></i>
                     {{if .FilterUser}}
                     <h5>No login attempts recorded for {{.FilterUser}}</h5>
-                    <p>Neither this username nor its certificate appears in the attempt log yet.</p>
                     {{else}}
                     <h5>No login attempts recorded</h5>
-                    <p>Attempts appear here once a client authenticates with a password. The log is written by auth.sh on the OpenVPN server.</p>
                     {{end}}
                 </div>
                 {{end}}

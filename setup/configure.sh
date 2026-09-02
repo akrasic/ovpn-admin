@@ -83,6 +83,11 @@ if [[ "${OVPN_PASSWD_AUTH:-false}" == "true" ]]; then
   echo "auth-user-pass-verify /etc/openvpn/scripts/auth.sh via-file" >> /etc/openvpn/openvpn.conf
   echo "script-security 2" >> /etc/openvpn/openvpn.conf
   echo "verify-client-cert require" >> /etc/openvpn/openvpn.conf
+  # auth.sh runs as the unprivileged user openvpn drops to, so the attempt log
+  # gets a directory that user can write and rotate in. The easyrsa dir itself
+  # stays root-owned - it holds the CA key.
+  mkdir -p "$EASY_RSA_LOC/log"
+  chown nobody "$EASY_RSA_LOC/log"
   openvpn-user db-init --db.path="$EASY_RSA_LOC/pki/users.db" && openvpn-user db-migrate --db.path="$EASY_RSA_LOC/pki/users.db"
 fi
 

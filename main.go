@@ -961,9 +961,10 @@ func main() {
 		*indexTxtPath = *easyrsaDirPath + "/pki/index.txt"
 	}
 	if *authLogPath == "" {
-		// Matches AUTH_LOG in setup/auth.sh: beside the PKI, outside pki/ so an
-		// easyrsa re-init cannot take the login history with it.
-		*authLogPath = *easyrsaDirPath + "/auth.log"
+		// Matches AUTH_LOG in setup/auth.sh: log/ is the one subdirectory the
+		// unprivileged openvpn user can write into (the PKI stays root-owned),
+		// and it sits outside pki/ so an easyrsa re-init keeps the history.
+		*authLogPath = *easyrsaDirPath + "/log/auth.log"
 	}
 
 	if *authDataBaseInit {
