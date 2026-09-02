@@ -18,7 +18,13 @@
             {{if eq $user.ConnectionStatus "Connected"}}
             <span class="online-badge">Online</span>
             {{end}}
+            {{if gt $user.FailedLogins 0}}
+            <span class="failed-badge" title="{{$user.FailedLogins}} failed login attempt(s) since the last successful login">{{$user.FailedLogins}} failed</span>
+            {{end}}
         </div>
+        {{if $user.LastLogin}}
+        <span class="last-login" title="Last successful login (UTC)">last login {{$user.LastLogin}}</span>
+        {{end}}
     </td>
     <td>
         {{if eq $user.AccountStatus "Active"}}

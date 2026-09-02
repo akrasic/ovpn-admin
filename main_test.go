@@ -2170,6 +2170,155 @@ func TestClientsAccessors_ConcurrentUse(t *testing.T) {
 }
 
 // =============================================================================
+// Login activity Tests
+// =============================================================================
+
+// writeAuthLog points authLogPath at a temp file holding the given lines, in the
+// exact format setup/auth.sh appends.
+func writeAuthLog(t *testing.T, lines string) {
+	t.Helper()
+	dir := t.TempDir()
+	orig := *authLogPath
+	*authLogPath = filepath.Join(dir, "auth.log")
+	t.Cleanup(func() { *authLogPath = orig })
+	if err := os.WriteFile(*authLogPath, []byte(lines), 0o600); err != nil {
+		t.Fatalf("writing auth log: %v", err)
+	}
+}
+
+func TestParseAuthLog_NewestFirstSkippingMalformedLines(t *testing.T) {
+	writeAuthLog(t,
+		"2026-09-01T10:00:00Z\tsuccess\talice\talice\t10.1.2.3:51820\n"+
+			"not a log line\n"+
+			"2026-09-01T11:00:00Z\tbad-password\talice\talice\t10.1.2.3:51821\n")
+
+	attempts := parseAuthLog(*authLogPath, 100)
+	if len(attempts) != 2 {
+		t.Fatalf("expected 2 parsed attempts with the malformed line skipped, got %d", len(attempts))
+	}
+	if attempts[0].Outcome != "bad-password" || attempts[1].Outcome != "success" {
+		t.Errorf("attempts should come back newest first, got %+v", attempts)
+	}
+	if attempts[0].Source != "10.1.2.3:51821" {
+		t.Errorf("source should carry the ip:port, got %q", attempts[0].Source)
+	}
+
+	if got := parseAuthLog(*authLogPath, 1); len(got) != 1 || got[0].Outcome != "bad-password" {
+		t.Errorf("the limit should keep the newest entries, got %+v", got)
+	}
+	if parseAuthLog(filepath.Join(t.TempDir(), "absent.log"), 10) != nil {
+		t.Error("a missing log is the normal no-password-auth state, not an error")
+	}
+}
+
+func TestAuthLoginStats_FailuresResetOnSuccess(t *testing.T) {
+	writeAuthLog(t,
+		"2026-09-01T10:00:00Z\tbad-password\talice\talice\t10.1.2.3:1\n"+
+			"2026-09-01T11:00:00Z\tsuccess\talice\talice\t10.1.2.3:2\n"+
+			"2026-09-01T12:00:00Z\tbad-password\talice\talice\t10.1.2.3:3\n"+
+			"2026-09-01T13:00:00Z\tbad-password\talice\talice\t10.1.2.3:4\n"+
+			// A cn-mismatch counts against the certificate that was used, not
+			// against the username the attacker typed.
+			"2026-09-01T14:00:00Z\tcn-mismatch\tbob\talice\t9.9.9.9:5\n")
+
+	stats := authLoginStats(*authLogPath)
+	alice := stats["alice"]
+	if alice.LastLogin != "2026-09-01T11:00:00Z" {
+		t.Errorf("LastLogin should be the last success, got %q", alice.LastLogin)
+	}
+	if alice.FailedLogins != 3 {
+		t.Errorf("expected 3 failures since the last success (2 bad passwords + 1 cn-mismatch on alice's cert), got %d", alice.FailedLogins)
+	}
+	if _, tracked := stats["bob"]; tracked {
+		t.Error("the typed username of a cn-mismatch must not be charged: the attempt used alice's certificate")
+	}
+}
+
+func TestUsersList_CarriesLoginActivity(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	dir := t.TempDir()
+	origIndex, origBackend := *indexTxtPath, *storageBackend
+	*indexTxtPath, *storageBackend = filepath.Join(dir, "index.txt"), "filesystem"
+	defer func() { *indexTxtPath, *storageBackend = origIndex, origBackend }()
+	index := "V\t400101000000Z\t\t01\tunknown\t/CN=alice\nV\t400101000000Z\t\t02\tunknown\t/CN=bob\n"
+	if err := os.WriteFile(*indexTxtPath, []byte(index), 0o600); err != nil {
+		t.Fatalf("writing index.txt: %v", err)
+	}
+	writeAuthLog(t,
+		"2026-09-01T10:00:00Z\tsuccess\talice\talice\t10.1.2.3:1\n"+
+			"2026-09-01T11:00:00Z\tbad-password\talice\talice\t10.1.2.3:2\n")
+
+	for _, user := range oAdmin.usersList() {
+		switch user.Identity {
+		case "alice":
+			if user.LastLogin != "2026-09-01T10:00:00Z" || user.FailedLogins != 1 {
+				t.Errorf("alice should carry her login stats, got LastLogin=%q FailedLogins=%d", user.LastLogin, user.FailedLogins)
+			}
+		case "bob":
+			if user.LastLogin != "" || user.FailedLogins != 0 {
+				t.Errorf("bob has no recorded attempts and should carry none, got %+v", user)
+			}
+		}
+	}
+}
+
+func TestModalActivityHandler_RendersAttempts(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	writeAuthLog(t,
+		"2026-09-01T10:00:00Z\tsuccess\talice\talice\t10.1.2.3:51820\n"+
+			"2026-09-01T11:00:00Z\tcn-mismatch\tbob\talice\t9.9.9.9:1\n")
+
+	req := httptest.NewRequest(http.MethodGet, "/modal/activity", nil)
+	w := httptest.NewRecorder()
+	oAdmin.modalActivityHandler(w, req)
+
+	body := w.Body.String()
+	for _, want := range []string{"Login Activity", "Success", "CN mismatch", "10.1.2.3:51820", "cert: alice"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("activity modal should contain %q", want)
+		}
+	}
+
+	// And the empty state when nothing was ever recorded.
+	orig := *authLogPath
+	*authLogPath = filepath.Join(t.TempDir(), "absent.log")
+	defer func() { *authLogPath = orig }()
+	w = httptest.NewRecorder()
+	oAdmin.modalActivityHandler(w, req)
+	if !strings.Contains(w.Body.String(), "No login attempts recorded") {
+		t.Error("an absent log should render the empty state, not an error")
+	}
+}
+
+func TestUserRows_ShowFailedLoginsAndLastLogin(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users": []OpenvpnClient{
+			{Identity: "alice", AccountStatus: "Active", LastLogin: "2026-09-01T10:00:00Z", FailedLogins: 3},
+			{Identity: "bob", AccountStatus: "Active"},
+		},
+		"ServerRole": "master",
+	})
+	if err != nil {
+		t.Fatalf("rendering user_rows: %v", err)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "3 failed") {
+		t.Error("a user with failures since their last login should carry a failed badge")
+	}
+	if !strings.Contains(body, "last login 2026-09-01T10:00:00Z") {
+		t.Error("the last successful login should be shown under the username")
+	}
+	if strings.Count(body, "failed-badge") != 1 || strings.Count(body, "last-login") != 1 {
+		t.Error("users without recorded activity must not render activity markup")
+	}
+}
+
+// =============================================================================
 // PKI file archiving Tests
 // =============================================================================
 

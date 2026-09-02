@@ -75,6 +75,9 @@ const (
 	// trickling data cannot hold a handler forever.
 	mgmtReadTimeout        = 3 * time.Second
 	mgmtReadOverallTimeout = 30 * time.Second
+	// authLogParseLimit bounds how many login-log entries one request parses;
+	// the file itself is size-capped by auth.sh's rotation.
+	authLogParseLimit = 2000
 )
 
 var (
@@ -96,6 +99,7 @@ var (
 	easyrsaDirPath           = kingpin.Flag("easyrsa.path", "path to easyrsa dir").Default("./easyrsa").Envar("EASYRSA_PATH").String()
 	indexTxtPath             = kingpin.Flag("easyrsa.index-path", "path to easyrsa index file").Default("").Envar("OVPN_INDEX_PATH").String()
 	easyrsaBinPath           = kingpin.Flag("easyrsa.bin-path", "path to easyrsa script").Default("easyrsa").Envar("EASYRSA_BIN_PATH").String()
+	authLogPath              = kingpin.Flag("auth.log-path", "path to the login attempt log written by auth.sh").Default("").Envar("OVPN_AUTH_LOG_PATH").String()
 	ccdEnabled               = kingpin.Flag("ccd", "enable client-config-dir").Default("false").Envar("OVPN_CCD").Bool()
 	ccdDir                   = kingpin.Flag("ccd.path", "path to client-config-dir").Default("./ccd").Envar("OVPN_CCD_PATH").String()
 	clientConfigTemplatePath = kingpin.Flag("templates.clientconfig-path", "path to custom client.conf.tpl").Default("").Envar("OVPN_TEMPLATES_CC_PATH").String()
@@ -246,6 +250,11 @@ type OpenvpnClient struct {
 	// IdentityHTML is only set while a search is active: the username with the
 	// matched characters wrapped in <mark>, pre-escaped. Render-only, never synced.
 	IdentityHTML template.HTML `json:"-"`
+	// LastLogin and FailedLogins come from the auth.sh attempt log when password
+	// auth is in use: the last successful login, and how many attempts have
+	// failed since it. Render-only, never synced.
+	LastLogin    string `json:"-"`
+	FailedLogins int    `json:"-"`
 
 	Identity         string `json:"Identity"`
 	AccountStatus    string `json:"AccountStatus"`
@@ -801,6 +810,18 @@ func (oAdmin *OvpnAdmin) modalCreateHandler(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+func (oAdmin *OvpnAdmin) modalActivityHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "modal_activity", map[string]interface{}{
+		"Attempts": parseAuthLog(*authLogPath, 100),
+	})
+	if err != nil {
+		log.Errorf("Error rendering modal_activity template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 func (oAdmin *OvpnAdmin) modalPasswordHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 	username := oAdmin.extractUsername(r)
@@ -916,6 +937,11 @@ func main() {
 
 	if *indexTxtPath == "" {
 		*indexTxtPath = *easyrsaDirPath + "/pki/index.txt"
+	}
+	if *authLogPath == "" {
+		// Matches AUTH_LOG in setup/auth.sh: beside the PKI, outside pki/ so an
+		// easyrsa re-init cannot take the login history with it.
+		*authLogPath = *easyrsaDirPath + "/auth.log"
 	}
 
 	if *authDataBaseInit {
@@ -1087,6 +1113,7 @@ func main() {
 
 	// Modal routes
 	http.HandleFunc(*listenBaseUrl+"modal/create", ovpnAdmin.modalCreateHandler)
+	http.HandleFunc(*listenBaseUrl+"modal/activity", ovpnAdmin.modalActivityHandler)
 	http.HandleFunc(*listenBaseUrl+"modal/password/", ovpnAdmin.modalPasswordHandler)
 	http.HandleFunc(*listenBaseUrl+"modal/rotate/", ovpnAdmin.modalRotateHandler)
 	http.HandleFunc(*listenBaseUrl+"modal/delete/", ovpnAdmin.modalDeleteHandler)
@@ -1555,6 +1582,7 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 	apochNow := time.Now().Unix()
 	thirtyDaysFromNow := time.Now().AddDate(0, 0, 30).Unix()
 	activeClients := oAdmin.getActiveClients()
+	logins := authLoginStats(*authLogPath)
 
 	for _, line := range indexTxtParser(fRead(*indexTxtPath)) {
 		if line.Identity != "server" && !strings.Contains(line.Identity, "REVOKED") {
@@ -1586,6 +1614,11 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 			}
 
 			ovpnClient.Connections = 0
+
+			if s, found := logins[line.Identity]; found {
+				ovpnClient.LastLogin = s.LastLogin
+				ovpnClient.FailedLogins = s.FailedLogins
+			}
 
 			userConnected, userConnectedTo := isUserConnected(line.Identity, activeClients)
 			if userConnected {
@@ -2028,6 +2061,83 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 		return nil, fmt.Sprintf("User %q successfully rotated", username)
 	}
 	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
+}
+
+// authAttempt is one line of the login log that setup/auth.sh appends to on the
+// OpenVPN host: every password-auth attempt with its outcome, never the password.
+type authAttempt struct {
+	Timestamp  string
+	Outcome    string // success, bad-password, cn-mismatch, empty-creds
+	Username   string
+	CommonName string
+	Source     string // ip:port the attempt came from
+}
+
+// parseAuthLog reads the attempt log newest first, capped at limit entries.
+// Lines that do not parse are skipped: the file is written by a shell script on
+// another container, so a torn or foreign line must never take the page down.
+// A missing file is normal - password auth may be off, or nobody has ever
+// tried to log in.
+func parseAuthLog(path string, limit int) []authAttempt {
+	// Checked rather than letting fRead warn: no log is the normal state when
+	// password auth is off or nobody has connected yet, and this runs per render.
+	if path == "" || !fExist(path) {
+		return nil
+	}
+	content := fRead(path)
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	attempts := make([]authAttempt, 0, min(limit, len(lines)))
+	for i := len(lines) - 1; i >= 0 && len(attempts) < limit; i-- {
+		fields := strings.Split(lines[i], "\t")
+		if len(fields) < 5 || fields[0] == "" || fields[1] == "" {
+			continue
+		}
+		attempts = append(attempts, authAttempt{
+			Timestamp:  fields[0],
+			Outcome:    fields[1],
+			Username:   fields[2],
+			CommonName: fields[3],
+			Source:     fields[4],
+		})
+	}
+	return attempts
+}
+
+// authLoginStats condenses the attempt log per certificate CN: when the user
+// last logged in, and how many attempts have failed since then. The count keys
+// on the certificate's CN rather than the typed username, so a cn-mismatch
+// probe lands on the account whose certificate was used.
+type loginStats struct {
+	LastLogin    string
+	FailedLogins int
+}
+
+func authLoginStats(path string) map[string]loginStats {
+	// Oldest first: iterate chronologically so a success resets the counter.
+	attempts := parseAuthLog(path, authLogParseLimit)
+	stats := make(map[string]loginStats)
+	for i := len(attempts) - 1; i >= 0; i-- {
+		a := attempts[i]
+		name := a.CommonName
+		if name == "" {
+			name = a.Username
+		}
+		if name == "" {
+			continue
+		}
+		s := stats[name]
+		if a.Outcome == "success" {
+			s.LastLogin = a.Timestamp
+			s.FailedLogins = 0
+		} else {
+			s.FailedLogins++
+		}
+		stats[name] = s
+	}
+	return stats
 }
 
 // pkiArchiveFilePairs maps the per-name files easyrsa keeps for username onto

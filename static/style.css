@@ -657,6 +657,35 @@ body {
     box-shadow: 0 0 0 3px var(--success-light);
 }
 
+/* Failed password attempts since the last successful login: the one signal on
+   the row that is allowed to be loud. Cleared automatically by the next
+   successful login. */
+.failed-badge {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0.625rem;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--radius-sm);
+    background: var(--danger-light);
+    color: var(--danger-deep);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.last-login {
+    display: block;
+    margin-top: 0.125rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Failure outcome in the activity modal, same dot-and-word shape as the rest. */
+.status-failed { color: var(--danger-deep); }
+.status-failed::before { background: var(--danger); }
+
 /* Row status colors. Connected rows keep only the edge marker: the online badge
    already names the state, and a full-row tint on every connected user drowned
    the one tint that matters (expired). */
@@ -916,6 +945,46 @@ body {
 .modal-content {
     background-color: var(--bg-primary);
     color: var(--text-primary);
+}
+
+/* Login activity modal: the table sits flush against the dialog edges and
+   scrolls inside the dialog, not with the page. */
+.modal-body-flush {
+    padding: 0;
+}
+
+.activity-scroll {
+    max-height: 24rem;
+    overflow-y: auto;
+}
+
+.activity-table {
+    margin: 0;
+}
+
+.activity-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.activity-table td {
+    padding: 0.5rem 1rem;
+    font-size: 0.8125rem;
+}
+
+.activity-time,
+.activity-source {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.activity-cn {
+    display: block;
+    font-size: 0.6875rem;
+    color: var(--danger-deep);
 }
 
 [data-theme="dark"] .btn-close {

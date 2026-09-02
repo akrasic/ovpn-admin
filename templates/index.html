@@ -43,6 +43,15 @@
                 <i class="bi bi-arrow-clockwise"></i>
                 Refresh
             </button>
+            {{if hasModule .Modules "passwdAuth"}}
+            <button type="button" class="btn btn-outline-secondary btn-sm"
+                    hx-get="/modal/activity"
+                    hx-target="#modal-container"
+                    title="Recent login attempts">
+                <i class="bi bi-clock-history"></i>
+                Logins
+            </button>
+            {{end}}
         </div>
         <div class="toolbar-right">
             <span class="result-count" id="result-count" role="status" aria-live="polite"></span>

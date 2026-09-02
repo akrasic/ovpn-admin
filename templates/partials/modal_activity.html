@@ -1,0 +1,63 @@
+{{define "modal_activity"}}
+<div class="modal-backdrop-custom show" role="dialog" aria-modal="true"
+     aria-labelledby="modal-title" onclick="if(event.target === this) closeModal()">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modal-title">
+                    <i class="bi bi-clock-history me-2"></i>
+                    Login Activity
+                </h5>
+                <button type="button" class="btn-close" aria-label="Close" onclick="closeModal()"></button>
+            </div>
+            <div class="modal-body modal-body-flush">
+                {{if .Attempts}}
+                <div class="activity-scroll">
+                    <table class="table activity-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">Time (UTC)</th>
+                                <th scope="col">Outcome</th>
+                                <th scope="col">User</th>
+                                <th scope="col">Source</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{range .Attempts}}
+                            <tr>
+                                <td class="activity-time">{{.Timestamp}}</td>
+                                <td>
+                                    {{if eq .Outcome "success"}}
+                                    <span class="status-badge status-active">Success</span>
+                                    {{else if eq .Outcome "bad-password"}}
+                                    <span class="status-badge status-failed">Bad password</span>
+                                    {{else if eq .Outcome "cn-mismatch"}}
+                                    <span class="status-badge status-failed">CN mismatch</span>
+                                    {{else}}
+                                    <span class="status-badge status-failed">{{.Outcome}}</span>
+                                    {{end}}
+                                </td>
+                                <td class="username">
+                                    {{.Username}}
+                                    {{if and .CommonName (ne .CommonName .Username)}}
+                                    <span class="activity-cn" title="Certificate common name">cert: {{.CommonName}}</span>
+                                    {{end}}
+                                </td>
+                                <td class="activity-source">{{.Source}}</td>
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                </div>
+                {{else}}
+                <div class="empty-state-inline">
+                    <i class="bi bi-clock-history"></i>
+                    <h5>No login attempts recorded</h5>
+                    <p>Attempts appear here once a client authenticates with a password. The log is written by auth.sh on the OpenVPN server.</p>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
