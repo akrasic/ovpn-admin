@@ -2083,6 +2083,37 @@ func TestUserDelete_ExpiredUserFreesTheUsername(t *testing.T) {
 	}
 }
 
+func TestUserCreate_HealsUserStrandedByEarlierDelete(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	dir := setupPkiTestDirs(t)
+
+	// The state a delete used to leave behind: the index entry renamed away, but
+	// the certificate files still filed under the username. easyrsa would refuse
+	// to ever issue for this name again.
+	writePkiFile(t, *indexTxtPath, "V\t200101000000Z\t\t05\tunknown\t/CN=REVOKED-ghost-cafe0123\n")
+	for _, f := range []string{"pki/issued/ghost.crt", "pki/private/ghost.key", "pki/reqs/ghost.req"} {
+		writePkiFile(t, filepath.Join(dir, f), "stranded")
+	}
+
+	created, msg, err := oAdmin.userCreate("ghost", "")
+	if !created {
+		t.Fatalf("creating a user stranded by an old delete should succeed, got %v (%s)", err, msg)
+	}
+
+	// The leftovers moved under the serial recorded when the entry was renamed.
+	for _, f := range []string{"pki/revoked/certs_by_serial/05.crt", "pki/revoked/private_by_serial/05.key", "pki/revoked/reqs_by_serial/05.req"} {
+		if data := fRead(filepath.Join(dir, f)); strings.TrimSpace(data) != "stranded" {
+			t.Errorf("%s should hold the stranded file, got %q", f, data)
+		}
+	}
+	if data := fRead(filepath.Join(dir, "pki/issued/ghost.crt")); strings.TrimSpace(data) != "crt" {
+		t.Errorf("pki/issued/ghost.crt should be the newly issued certificate, got %q", data)
+	}
+	if !strings.Contains(fRead(*indexTxtPath), "/CN=ghost") {
+		t.Error("the index should list the recreated user")
+	}
+}
+
 func TestUserRotate_ReplacesCertificateDespiteExistingFiles(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 	dir := setupPkiTestDirs(t)

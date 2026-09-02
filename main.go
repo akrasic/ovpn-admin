@@ -1517,6 +1517,12 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string, er
 			return false, fmt.Sprintf("Could not create certificate for user %q: %s", username, err), err
 		}
 	} else {
+		// Deletes made before archiving existed renamed the index entry but left
+		// the certificate files under the name, which makes easyrsa refuse to
+		// issue for it. The name is free per the index (checked above), so any
+		// files still carrying it belong to a former certificate.
+		archiveOrphanedUserPkiFiles(username)
+
 		out, err := runCmdDir(*easyrsaDirPath, *easyrsaBinPath, "--batch", "build-client-full", username, "nopass")
 		if err != nil {
 			log.Errorf("userCreate: build-client-full(%s): %v", username, err)
@@ -1921,6 +1927,40 @@ func archiveUserPkiFiles(username, serial string) {
 			log.Warnf("archiveUserPkiFiles: %v - recreating user %q may fail until %s is removed", err, username, pair[0])
 		}
 	}
+}
+
+// archiveOrphanedUserPkiFiles clears certificate files stranded under a name
+// whose index entry is gone. Callers must have already established that no
+// /CN=<username> entry exists. The serial comes from the newest
+// REVOKED-<username>-* entry - the rename a delete leaves behind - so the
+// files land where a delete today would have put them; a name with no such
+// entry (index rebuilt, out-of-band cleanup) gets a generated one.
+func archiveOrphanedUserPkiFiles(username string) {
+	leftover := false
+	for _, pair := range pkiArchiveFilePairs(username, "") {
+		if fExist(pair[0]) {
+			leftover = true
+			break
+		}
+	}
+	if !leftover {
+		return
+	}
+
+	serial := ""
+	for _, line := range indexTxtParser(fRead(*indexTxtPath)) {
+		if strings.HasPrefix(line.DistinguishedName, "/CN=REVOKED-"+username+"-") {
+			// Entries are appended in issue order, so the last match belongs to
+			// the most recently deleted certificate - the one the files are from.
+			serial = line.SerialNumber
+		}
+	}
+	if serial == "" {
+		serial = "orphan-" + strings.Replace(uuid.New().String(), "-", "", -1)
+	}
+
+	log.Warnf("found certificate files for %q left behind by an earlier delete, archiving them under serial %s", username, serial)
+	archiveUserPkiFiles(username, serial)
 }
 
 // restoreUserPkiFiles is the inverse of archiveUserPkiFiles, for a rotate whose
