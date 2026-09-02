@@ -1,4 +1,4 @@
-{{define "content"}}
+{{define "users_content"}}
 <!-- Summary strip. Initial render and every refreshStats swap share the same partial. -->
 <div class="stats-grid" hx-get="/stats" hx-trigger="refreshStats from:body" hx-swap="innerHTML">
     {{template "stats_cards" .}}
@@ -29,7 +29,7 @@
             <button type="button" class="btn btn-outline-secondary btn-sm"
                     id="toggle-revoked-btn"
                     aria-pressed="{{if .HideRevoked}}true{{else}}false{{end}}"
-                    hx-get="/users"
+                    hx-get="/partials/users"
                     hx-target="#user-table-body"
                     hx-swap="innerHTML"
                     hx-include="[name='search']"
@@ -61,7 +61,7 @@
                        class="form-control search-input"
                        placeholder="Fuzzy search... (/ or Ctrl+K)"
                        name="search"
-                       hx-get="/users"
+                       hx-get="/partials/users"
                        hx-target="#user-table-body"
                        hx-swap="innerHTML"
                        hx-trigger="keyup changed delay:300ms"
@@ -98,7 +98,7 @@
                     </tr>
                 </thead>
                 <tbody id="user-table-body"
-                       hx-get="/users"
+                       hx-get="/partials/users"
                        hx-trigger="load, refresh"
                        hx-include="[name='search']"
                        hx-swap="innerHTML">

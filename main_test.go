@@ -30,6 +30,7 @@ func newTestOvpnAdmin() *OvpnAdmin {
 		"add": func(a, b int) int {
 			return a + b
 		},
+		"humanBytes": humanBytes,
 		"dict": func(values ...interface{}) map[string]interface{} {
 			dict := make(map[string]interface{})
 			for i := 0; i < len(values); i += 2 {
@@ -2166,6 +2167,93 @@ func TestClientsAccessors_ConcurrentUse(t *testing.T) {
 
 	if clients := oAdmin.getClients(); len(clients) != 1 || clients[0].Identity != "alice" {
 		t.Errorf("unexpected final clients state: %+v", clients)
+	}
+}
+
+// =============================================================================
+// Dashboard Tests
+// =============================================================================
+
+func TestHumanBytes(t *testing.T) {
+	for in, want := range map[string]string{
+		"512":        "512 B",
+		"2048":       "2.0 KB",
+		"1572864":    "1.5 MB",
+		"5368709120": "5.0 GB",
+		"":           "",
+		"garbage":    "garbage",
+	} {
+		if got := humanBytes(in); got != want {
+			t.Errorf("humanBytes(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDashboardPage_ShowsConnectionsAndRecentLogins(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.modules = []string{"core", "passwdAuth"}
+	oAdmin.setActiveClients([]clientStatus{{
+		CommonName:     "alice",
+		RealAddress:    "203.0.113.7:51820",
+		VirtualAddress: "192.168.100.2",
+		BytesReceived:  "1572864",
+		BytesSent:      "2048",
+		ConnectedSince: "2026-09-02 08:00:00",
+		ConnectedTo:    "main",
+	}})
+	writeAuthLog(t, "2026-09-02T08:00:01Z\tsuccess\talice\talice\t203.0.113.7:51820\n")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	oAdmin.dashboardPageHandler(w, req)
+
+	body := w.Body.String()
+	for _, want := range []string{
+		"Connected Now", "alice", "203.0.113.7:51820", "192.168.100.2", "1.5 MB", "2.0 KB", "main",
+		"Recent Logins", "stats-grid",
+		`href="/users"`, // navigation to the management page
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard should contain %q", want)
+		}
+	}
+	if strings.Contains(body, `id="user-table-body"`) {
+		t.Error("the management table belongs to the Users page, not the dashboard")
+	}
+	if !strings.Contains(body, `aria-current="page"`) {
+		t.Error("the active nav link should carry aria-current")
+	}
+}
+
+func TestUsersPage_KeepsTableAndGainsNav(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	w := httptest.NewRecorder()
+	oAdmin.indexPageHandler(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "user-table-body") {
+		t.Error("the Users page should keep the management table")
+	}
+	if !strings.Contains(body, `href="/"`) {
+		t.Error("the Users page should link back to the dashboard")
+	}
+	if !strings.Contains(body, `hx-get="/partials/users"`) {
+		t.Error("the row list should load from /partials/users now that GET /users is a page")
+	}
+}
+
+func TestConnectionsHandler_EmptyState(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.mgmtInterfaces = map[string]string{}
+
+	req := httptest.NewRequest(http.MethodGet, "/partials/connections", nil)
+	w := httptest.NewRecorder()
+	oAdmin.connectionsHandler(w, req)
+
+	if !strings.Contains(w.Body.String(), "No active connections") {
+		t.Error("an empty sweep should render the empty state")
 	}
 }
 

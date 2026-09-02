@@ -1,0 +1,37 @@
+{{define "connections"}}
+{{if .ActiveConnections}}
+<div class="table-responsive">
+    <table class="table connections-table">
+        <thead>
+            <tr>
+                <th scope="col">User</th>
+                <th scope="col">Source</th>
+                <th scope="col">VPN address</th>
+                <th scope="col" class="text-end">Received</th>
+                <th scope="col" class="text-end">Sent</th>
+                <th scope="col">Connected since</th>
+                <th scope="col">Server</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .ActiveConnections}}
+            <tr>
+                <td><strong class="username">{{.CommonName}}</strong></td>
+                <td class="mono-cell">{{.RealAddress}}</td>
+                <td class="mono-cell">{{.VirtualAddress}}</td>
+                <td class="text-end">{{humanBytes .BytesReceived}}</td>
+                <td class="text-end">{{humanBytes .BytesSent}}</td>
+                <td class="mono-cell">{{.ConnectedSince}}</td>
+                <td>{{.ConnectedTo}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{else}}
+<div class="empty-state-inline">
+    <i class="bi bi-broadcast"></i>
+    <h5>No active connections</h5>
+</div>
+{{end}}
+{{end}}

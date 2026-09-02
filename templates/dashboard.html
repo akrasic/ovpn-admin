@@ -1,0 +1,71 @@
+{{define "dashboard_content"}}
+<!-- Summary strip, shared with the Users page -->
+<div class="stats-grid" hx-get="/stats" hx-trigger="refreshStats from:body" hx-swap="innerHTML">
+    {{template "stats_cards" .}}
+</div>
+
+<div class="dashboard-columns">
+    <div class="panel dashboard-connections">
+        <div class="panel-header">
+            <h2 class="panel-title">
+                <i class="bi bi-broadcast"></i>
+                Connected Now
+            </h2>
+            <div class="panel-actions">
+                <button type="button" class="btn btn-outline-secondary btn-sm"
+                        onclick="refreshUsers()"
+                        title="Refresh (R)">
+                    <i class="bi bi-arrow-clockwise"></i>
+                    Refresh
+                </button>
+            </div>
+        </div>
+        <div class="panel-body">
+            <div id="connections-panel"
+                 hx-get="/partials/connections"
+                 hx-trigger="refresh"
+                 hx-swap="innerHTML">
+                {{template "connections" .}}
+            </div>
+        </div>
+    </div>
+
+    {{if hasModule .Modules "passwdAuth"}}
+    <div class="panel dashboard-logins">
+        <div class="panel-header">
+            <h2 class="panel-title">
+                <i class="bi bi-clock-history"></i>
+                Recent Logins
+            </h2>
+            <div class="panel-actions">
+                <button type="button" class="btn btn-outline-secondary btn-sm"
+                        hx-get="/modal/activity"
+                        hx-target="#modal-container">
+                    View all
+                </button>
+            </div>
+        </div>
+        <div class="panel-body">
+            {{if .RecentAttempts}}
+            <ul class="recent-logins">
+                {{range .RecentAttempts}}
+                <li class="recent-login">
+                    <span class="status-badge {{if eq .Outcome "success"}}status-active{{else}}status-failed{{end}}">
+                        <span class="username">{{.Username}}</span>
+                    </span>
+                    <span class="recent-login-meta">{{if ne .Outcome "success"}}{{.Outcome}} &middot; {{end}}{{.Source}}</span>
+                    <span class="recent-login-time">{{.Timestamp}}</span>
+                </li>
+                {{end}}
+            </ul>
+            {{else}}
+            <div class="empty-state-inline">
+                <i class="bi bi-clock-history"></i>
+                <h5>No login attempts recorded</h5>
+            </div>
+            {{end}}
+        </div>
+    </div>
+    {{end}}
+</div>
+{{end}}

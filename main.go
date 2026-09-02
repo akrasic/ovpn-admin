@@ -776,6 +776,26 @@ func (oAdmin *OvpnAdmin) statsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Index page handler - renders the main page
+// humanBytes renders a byte count (as the management interface reports it, a
+// decimal string) in the nearest unit, for the connections table.
+func humanBytes(s string) string {
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return s
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	i := 0
+	for n >= 1024 && i < len(units)-1 {
+		n /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%.0f B", n)
+	}
+	return fmt.Sprintf("%.1f %s", n, units[i])
+}
+
+// indexPageHandler renders the Users management page.
 func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 
@@ -786,6 +806,7 @@ func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "base", map[string]interface{}{
+		"Page":        "users",
 		"Users":       oAdmin.getClients(),
 		"ServerRole":  oAdmin.role,
 		"Modules":     oAdmin.modules,
@@ -795,6 +816,44 @@ func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request
 	})
 	if err != nil {
 		log.Errorf("Error rendering index template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// dashboardPageHandler renders the home page: who is connected right now, the
+// summary figures, and the latest login attempts.
+func (oAdmin *OvpnAdmin) dashboardPageHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "base", map[string]interface{}{
+		"Page":              "dashboard",
+		"ServerRole":        oAdmin.role,
+		"Modules":           oAdmin.modules,
+		"LastSync":          oAdmin.lastSuccessfulSyncTime,
+		"Stats":             oAdmin.calculateStats(),
+		"ActiveConnections": oAdmin.getActiveClients(),
+		"RecentAttempts":    parseAuthLog(*authLogPath, 8),
+	})
+	if err != nil {
+		log.Errorf("Error rendering dashboard template: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// connectionsHandler re-renders the dashboard's connection list with fresh
+// management-interface data, for the explicit refresh.
+func (oAdmin *OvpnAdmin) connectionsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Debug(r.RemoteAddr, " ", r.RequestURI)
+
+	oAdmin.setActiveClients(oAdmin.mgmtGetActiveClients())
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "connections", map[string]interface{}{
+		"ActiveConnections": oAdmin.getActiveClients(),
+	})
+	if err != nil {
+		log.Errorf("Error rendering connections template: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -1032,6 +1091,7 @@ func main() {
 		"add": func(a, b int) int {
 			return a + b
 		},
+		"humanBytes": humanBytes,
 		"dict": func(values ...interface{}) map[string]interface{} {
 			dict := make(map[string]interface{})
 			for i := 0; i < len(values); i += 2 {
@@ -1061,20 +1121,24 @@ func main() {
 	// Main page route
 	http.HandleFunc(*listenBaseUrl, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == *listenBaseUrl || r.URL.Path == strings.TrimRight(*listenBaseUrl, "/") {
-			ovpnAdmin.indexPageHandler(w, r)
+			ovpnAdmin.dashboardPageHandler(w, r)
 		} else {
 			http.NotFound(w, r)
 		}
 	})
 
-	// User list (HTMX partial) and create user
+	// Users management page, and create user (the POST target keeps its URL)
 	http.HandleFunc(*listenBaseUrl+"users", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			ovpnAdmin.userCreateHandler(w, r)
 			return
 		}
-		ovpnAdmin.userListHandler(w, r)
+		ovpnAdmin.indexPageHandler(w, r)
 	})
+
+	// HTMX partials
+	http.HandleFunc(*listenBaseUrl+"partials/users", ovpnAdmin.userListHandler)
+	http.HandleFunc(*listenBaseUrl+"partials/connections", ovpnAdmin.connectionsHandler)
 
 	// Stats (HTMX partial for dashboard refresh)
 	http.HandleFunc(*listenBaseUrl+"stats", ovpnAdmin.statsHandler)

@@ -22,6 +22,10 @@
             <div class="header-brand">
                 <i class="bi bi-shield-lock-fill brand-mark" aria-hidden="true"></i>
                 <h1>OpenVPN <span class="brand-light">Admin</span></h1>
+                <nav class="header-nav" aria-label="Primary">
+                    <a href="/" class="nav-link{{if eq .Page "dashboard"}} active{{end}}"{{if eq .Page "dashboard"}} aria-current="page"{{end}}>Home</a>
+                    <a href="/users" class="nav-link{{if eq .Page "users"}} active{{end}}"{{if eq .Page "users"}} aria-current="page"{{end}}>Users</a>
+                </nav>
             </div>
             <div class="header-actions">
                 {{if eq .ServerRole "slave"}}
@@ -54,7 +58,7 @@
     <!-- Main Content -->
     <main class="app-main">
         <div class="container-fluid">
-            {{template "content" .}}
+            {{if eq .Page "dashboard"}}{{template "dashboard_content" .}}{{else}}{{template "users_content" .}}{{end}}
         </div>
     </main>
 
@@ -315,7 +319,7 @@
             const search = document.querySelector('.search-input');
             if (search) search.value = '';
             setHideRevoked(false);
-            htmx.ajax('GET', '/users', { target: '#user-table-body', swap: 'innerHTML' });
+            htmx.ajax('GET', '/partials/users', { target: '#user-table-body', swap: 'innerHTML' });
         }
 
         // =====================================================================
@@ -326,10 +330,14 @@
         // search box, the row selection and any open modal.
         // =====================================================================
         function refreshUsers() {
-            // The row list listens for `refresh` on itself and the summary cards for
-            // `refreshStats` on body. Distinct events on purpose: `refresh` bubbles up
-            // from the tbody too, so one shared name would fetch everything twice.
-            htmx.trigger('#user-table-body', 'refresh');
+            // The row list (Users page) and the connections panel (Home) listen for
+            // `refresh` on themselves; the summary cards for `refreshStats` on body.
+            // Distinct events on purpose: `refresh` bubbles up from the listener too,
+            // so one shared name would fetch everything twice.
+            ['#user-table-body', '#connections-panel'].forEach(function(selector) {
+                const el = document.querySelector(selector);
+                if (el) htmx.trigger(el, 'refresh');
+            });
             htmx.trigger(document.body, 'refreshStats');
         }
 

@@ -235,6 +235,36 @@ body {
     color: var(--gray-400);
 }
 
+/* Primary navigation, set off from the brand by a hairline. */
+.header-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: 1.25rem;
+    padding-left: 1.25rem;
+    border-left: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.header-nav .nav-link {
+    padding: 0.375rem 0.75rem;
+    border-radius: var(--radius);
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--gray-400);
+    text-decoration: none;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.header-nav .nav-link:hover {
+    color: var(--header-text);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.header-nav .nav-link.active {
+    color: var(--header-text);
+    background: rgba(255, 255, 255, 0.12);
+}
+
 .header-actions {
     display: flex;
     align-items: center;
@@ -685,6 +715,65 @@ body {
 /* Failure outcome in the activity modal, same dot-and-word shape as the rest. */
 .status-failed { color: var(--danger-deep); }
 .status-failed::before { background: var(--danger); }
+
+/* =========================================================================
+   Home Dashboard
+   ========================================================================= */
+.dashboard-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: 1.5rem;
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .dashboard-columns { grid-template-columns: 1fr; }
+}
+
+.connections-table td {
+    padding: 0.625rem 1rem;
+    font-size: 0.8125rem;
+}
+
+.mono-cell {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.recent-logins {
+    list-style: none;
+    margin: 0;
+    padding: 0.25rem 0;
+}
+
+.recent-login {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.5rem 1.5rem;
+}
+
+.recent-login + .recent-login {
+    border-top: 1px solid var(--border-color-light);
+}
+
+.recent-login-meta {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.recent-login-time {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
 
 /* Row status colors. Connected rows keep only the edge marker: the online badge
    already names the state, and a full-row tint on every connected user drowned
@@ -1303,6 +1392,11 @@ kbd {
         flex-direction: column;
         gap: 0.75rem;
         text-align: center;
+    }
+
+    .header-brand {
+        flex-wrap: wrap;
+        justify-content: center;
     }
 
     .header-actions {
