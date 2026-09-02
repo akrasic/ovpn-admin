@@ -41,6 +41,7 @@
                 hx-post="/users/{{$user.Identity}}/revoke"
                 hx-target="#user-table-body"
                 hx-swap="innerHTML"
+                hx-include="[name='search']"
                 hx-confirm="Are you sure you want to revoke {{$user.Identity}}?"
                 title="Revoke certificate">
             <i class="bi bi-shield-x"></i>
@@ -69,6 +70,7 @@
                 hx-post="/users/{{$user.Identity}}/unrevoke"
                 hx-target="#user-table-body"
                 hx-swap="innerHTML"
+                hx-include="[name='search']"
                 title="Restore certificate">
             <i class="bi bi-arrow-counterclockwise"></i>
             <span class="btn-text">Restore</span>

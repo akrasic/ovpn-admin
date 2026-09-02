@@ -63,6 +63,13 @@ const (
 	prefixStaticRoute      = "ifconfig-push"
 
 	kubeNamespaceFilePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+	// The management interface is now consulted while serving a request, so both the
+	// connect and the read have to be bounded. mgmtRead stops only when it recognises a
+	// sentinel in the reply, so a socket that accepts and then says nothing useful would
+	// otherwise block the handler for ever.
+	mgmtDialTimeout = 3 * time.Second
+	mgmtReadTimeout = 3 * time.Second
 )
 
 var (
@@ -288,42 +295,14 @@ func (oAdmin *OvpnAdmin) userListHandler(w http.ResponseWriter, r *http.Request)
 		oAdmin.clients = oAdmin.usersList()
 	}
 
-	// Check if hide revoked filter is set
-	hideRevoked := false
-	if cookie, err := r.Cookie("hideRevoked"); err == nil {
-		hideRevoked = cookie.Value == "true"
-	}
-
-	// Filter users if hideRevoked is set
-	users := oAdmin.clients
-	if hideRevoked {
-		var filtered []OpenvpnClient
-		for _, u := range users {
-			if u.AccountStatus == "Active" {
-				filtered = append(filtered, u)
-			}
-		}
-		users = filtered
-	}
-
-	// Search filter
-	search := r.URL.Query().Get("search")
-	if search != "" {
-		var filtered []OpenvpnClient
-		searchLower := strings.ToLower(search)
-		for _, u := range users {
-			if strings.Contains(strings.ToLower(u.Identity), searchLower) {
-				filtered = append(filtered, u)
-			}
-		}
-		users = filtered
-	}
+	users := oAdmin.visibleUsers(r)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
 		"Users":      users,
 		"ServerRole": oAdmin.role,
 		"Modules":    oAdmin.modules,
+		"Filtered":   oAdmin.filtersActive(r),
 	})
 	if err != nil {
 		log.Errorf("Error rendering user_rows template: %v", err)
@@ -440,31 +419,82 @@ func (oAdmin *OvpnAdmin) extractUsername(r *http.Request) string {
 	return r.FormValue("username")
 }
 
-// Helper function to render user rows
-func (oAdmin *OvpnAdmin) renderUserRows(w http.ResponseWriter, r *http.Request) {
-	oAdmin.clients = oAdmin.usersList()
+// visibleUsers applies the two filters the toolbar exposes - the hideRevoked cookie and
+// the search box - to the client list. Both the plain list request and the re-render that
+// follows a mutation go through here, so an action taken while a filter is active does not
+// reset the table to every user.
+func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
+	users := oAdmin.clients
 
 	hideRevoked := false
 	if cookie, err := r.Cookie("hideRevoked"); err == nil {
 		hideRevoked = cookie.Value == "true"
 	}
 
-	users := oAdmin.clients
+	// The toggle is labelled "Hide Revoked", so only revoked users are hidden. Expired
+	// ones stay listed: they are the entries an operator still has to rotate or delete.
 	if hideRevoked {
-		var filtered []OpenvpnClient
-		for _, u := range users {
-			if u.AccountStatus == "Active" {
-				filtered = append(filtered, u)
+		filtered := make([]OpenvpnClient, 0, len(users))
+		for _, user := range users {
+			if user.AccountStatus != "Revoked" {
+				filtered = append(filtered, user)
 			}
 		}
 		users = filtered
 	}
+
+	// FormValue covers the query string on a GET and the posted body on a mutation, which
+	// is how hx-include delivers the term back to us.
+	if search := r.FormValue("search"); search != "" {
+		needle := strings.ToLower(search)
+		filtered := make([]OpenvpnClient, 0, len(users))
+		for _, user := range users {
+			if strings.Contains(strings.ToLower(user.Identity), needle) {
+				filtered = append(filtered, user)
+			}
+		}
+		users = filtered
+	}
+
+	return users
+}
+
+// filtersActive reports whether the row list was narrowed by the toolbar, so the empty
+// state can tell "nothing matches your filter" apart from "there are no users".
+func (oAdmin *OvpnAdmin) filtersActive(r *http.Request) bool {
+	if r.FormValue("search") != "" {
+		return true
+	}
+	cookie, err := r.Cookie("hideRevoked")
+	return err == nil && cookie.Value == "true"
+}
+
+// userAccountStatus reports the status the UI shows for username - "Active", "Revoked" or
+// "Expired" - or "" when the user is not in the certificate index.
+func (oAdmin *OvpnAdmin) userAccountStatus(username string) string {
+	for _, user := range oAdmin.usersList() {
+		if user.Identity == username {
+			return user.AccountStatus
+		}
+	}
+	return ""
+}
+
+// Helper function to render user rows
+func (oAdmin *OvpnAdmin) renderUserRows(w http.ResponseWriter, r *http.Request) {
+	// usersList reads activeClients to decide who is online, so refresh that first or the
+	// rows carry certificate data from disk next to connection data from up to 28s ago.
+	oAdmin.activeClients = oAdmin.mgmtGetActiveClients()
+	oAdmin.clients = oAdmin.usersList()
+
+	users := oAdmin.visibleUsers(r)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
 		"Users":      users,
 		"ServerRole": oAdmin.role,
 		"Modules":    oAdmin.modules,
+		"Filtered":   oAdmin.filtersActive(r),
 	})
 	if err != nil {
 		log.Errorf("Error rendering user_rows template: %v", err)
@@ -1519,12 +1549,17 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string, er
 // hxToast builds an HX-Trigger header value for the client-side toast. The payload is
 // JSON-encoded rather than concatenated: usernames and command output can contain
 // quotes or backslashes, which would otherwise break out of the JSON string.
+// hxToast builds the HX-Trigger payload sent after a successful mutation: the toast to
+// show, plus a `refresh` event. The summary cards are bound to `refresh from:body`, and
+// nothing else fires it now that the 15s poll is gone - without this they would keep
+// showing pre-mutation counts until the operator hit Refresh.
 func hxToast(message, level string) string {
 	payload := map[string]interface{}{
 		"showToast": map[string]string{
 			"message": message,
 			"type":    level,
 		},
+		"refresh": true,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -1847,6 +1882,16 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 
 func (oAdmin *OvpnAdmin) userDelete(username string) (error, string) {
 	if checkUserExist(username) {
+		// Deleting only renames the index entry, it does not flip the certificate to
+		// revoked. Removing an active user would therefore leave a valid certificate
+		// that never enters the CRL, so the holder could keep connecting. Require the
+		// certificate to be revoked or expired first, which is what the per-row buttons
+		// have always offered.
+		if oAdmin.userAccountStatus(username) == "Active" {
+			return userInputError{fmt.Sprintf("user %q is still active", username)},
+				fmt.Sprintf("User %q is still active - revoke the certificate before deleting it", username)
+		}
+
 		if *storageBackend == "kubernetes.secrets" {
 			err := app.easyrsaDelete(username)
 			if err != nil {
@@ -1893,6 +1938,9 @@ func (oAdmin *OvpnAdmin) mgmtRead(conn net.Conn) string {
 	var out string
 	var n int
 	var err error
+	if err := conn.SetReadDeadline(time.Now().Add(mgmtReadTimeout)); err != nil {
+		log.Warnf("mgmtRead: could not set read deadline: %v", err)
+	}
 	for {
 		n, err = conn.Read(recvData)
 		if n <= 0 || err != nil {
@@ -1963,7 +2011,7 @@ func (oAdmin *OvpnAdmin) mgmtConnectedUsersParser(text, serverName string) []cli
 }
 
 func (oAdmin *OvpnAdmin) mgmtKillUserConnection(username, serverName string) {
-	conn, err := net.Dial("tcp", oAdmin.mgmtInterfaces[serverName])
+	conn, err := net.DialTimeout("tcp", oAdmin.mgmtInterfaces[serverName], mgmtDialTimeout)
 	if err != nil {
 		log.Errorf("openvpn mgmt interface for %s is not reachable by addr %s", serverName, oAdmin.mgmtInterfaces[serverName])
 		return
@@ -1978,10 +2026,12 @@ func (oAdmin *OvpnAdmin) mgmtGetActiveClients() []clientStatus {
 	var activeClients []clientStatus
 
 	for srv, addr := range oAdmin.mgmtInterfaces {
-		conn, err := net.Dial("tcp", addr)
+		conn, err := net.DialTimeout("tcp", addr, mgmtDialTimeout)
 		if err != nil {
 			log.Warnf("openvpn mgmt interface for %s is not reachable by addr %s", srv, addr)
-			break
+			// Skip this server, do not abandon the rest: mgmtInterfaces is a map, so
+			// `break` dropped a random subset of the remaining servers' clients.
+			continue
 		}
 		oAdmin.mgmtRead(conn) // read welcome message
 		conn.Write([]byte("status 1\n"))
@@ -2008,7 +2058,7 @@ func (oAdmin *OvpnAdmin) mgmtSetTimeFormat() {
 		var conn net.Conn
 		var err error
 		for connAttempt := 0; connAttempt < 10; connAttempt++ {
-			conn, err = net.Dial("tcp", addr)
+			conn, err = net.DialTimeout("tcp", addr, mgmtDialTimeout)
 			if err == nil {
 				log.Debugf("mgmtSetTimeFormat: successful connection to %s/%s", srv, addr)
 				break

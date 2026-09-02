@@ -16,3 +16,6 @@ ccd_slave
 *.ntvs*
 *.njsproj
 *.sln
+
+# Build output
+ovpn-admin

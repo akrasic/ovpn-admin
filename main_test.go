@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -543,21 +544,54 @@ func TestUserRowsTemplate_ExpiredUser(t *testing.T) {
 func TestUserRowsTemplate_EmptyList(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 
+	// No users and no filter: offer the way to create the first one. The copy used to
+	// blame a search that was not running.
 	w := httptest.NewRecorder()
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
 		"Users":      []OpenvpnClient{},
 		"ServerRole": "master",
 		"Modules":    []string{"core"},
+		"Filtered":   false,
 	})
-
 	if err != nil {
 		t.Fatalf("Template execution failed: %v", err)
 	}
 
 	body := w.Body.String()
+	if !strings.Contains(body, "No users yet") {
+		t.Error("An unfiltered empty list should say there are no users yet")
+	}
+	if !strings.Contains(body, "Add User") {
+		t.Error("An unfiltered empty list should offer the Add User action")
+	}
+	if strings.Contains(body, "search") {
+		t.Error("An unfiltered empty list must not blame a search that is not active")
+	}
+}
 
-	if !strings.Contains(body, "No users found") {
-		t.Error("Empty user list should show 'No users found' message")
+func TestUserRowsTemplate_EmptyListWhileFiltered(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users":      []OpenvpnClient{},
+		"ServerRole": "master",
+		"Modules":    []string{"core"},
+		"Filtered":   true,
+	})
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "No matching users") {
+		t.Error("A filtered empty list should say nothing matches")
+	}
+	if !strings.Contains(body, "clearFilters()") {
+		t.Error("A filtered empty list should offer a way back to the full list")
+	}
+	if strings.Contains(body, "Add User") {
+		t.Error("Add User is misleading here: users may exist but be filtered out")
 	}
 }
 
@@ -1205,21 +1239,37 @@ func TestUserRowsTemplate_NoCheckboxForSlave(t *testing.T) {
 // Live Status Indicator Tests
 // =============================================================================
 
-func TestLiveStatusIndicator(t *testing.T) {
+func TestNoAutoRefresh(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
-
 	oAdmin.indexPageHandler(w, req)
-
 	body := w.Body.String()
 
-	if !strings.Contains(body, "live-indicator") {
-		t.Error("Page should contain live status indicator")
+	// The background reload fought the search box, the row selection and open modals, so
+	// it was removed along with the header indicator that toggled it.
+	for _, gone := range []string{
+		"setInterval",
+		"autoRefreshInterval",
+		"AUTO_REFRESH_MS",
+		"startAutoRefresh",
+		"toggleAutoRefresh",
+		"visibilitychange",
+		"live-indicator",
+		"live-dot",
+	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("auto-refresh residue still served to the browser: %q", gone)
+		}
 	}
-	if !strings.Contains(body, "live-dot") {
-		t.Error("Page should contain live dot animation element")
+
+	// Refreshing is still available, just only when asked for.
+	if !strings.Contains(body, "function refreshUsers()") {
+		t.Error("an explicit refresh helper should remain")
+	}
+	if !strings.Contains(body, "onclick=\"refreshUsers()\"") {
+		t.Error("the toolbar Refresh button should call refreshUsers()")
 	}
 }
 
@@ -1681,5 +1731,607 @@ func TestValidatePassword_Bounds(t *testing.T) {
 				t.Errorf("validatePassword(len %d) accepted", len(tt.password))
 			}
 		})
+	}
+}
+
+// =============================================================================
+// Bulk selection and delete Tests
+// =============================================================================
+
+func TestUserRowsTemplate_CheckboxForEveryStatus(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users": []OpenvpnClient{
+			{Identity: "activeuser", AccountStatus: "Active", ExpirationDate: "2099-12-31 23:59:59"},
+			{Identity: "revokeduser", AccountStatus: "Revoked", RevocationDate: "2025-01-01 00:00:00"},
+			{Identity: "expireduser", AccountStatus: "Expired", ExpirationDate: "2020-01-01 00:00:00"},
+		},
+		"ServerRole": "master",
+		"Modules":    []string{"core"},
+	})
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	body := w.Body.String()
+
+	// A revoked or expired user has to be selectable, otherwise it cannot be reached by
+	// the bulk delete action at all.
+	for _, status := range []string{"Active", "Revoked", "Expired"} {
+		if !strings.Contains(body, `data-status="`+status+`"`) {
+			t.Errorf("Expected a checkbox carrying data-status=%q", status)
+		}
+	}
+	if got := strings.Count(body, "user-checkbox"); got != 3 {
+		t.Errorf("Expected a checkbox on all 3 rows, got %d", got)
+	}
+}
+
+func TestBulkActionsBar_HasDeleteSelected(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.role = "master"
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	oAdmin.indexPageHandler(w, req)
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "Delete Selected") {
+		t.Error("Bulk actions should offer a 'Delete Selected' button")
+	}
+	if !strings.Contains(body, `id="bulk-delete-btn"`) {
+		t.Error("Bulk delete button needs the id the enable/disable logic looks up")
+	}
+	if !strings.Contains(body, `id="bulk-revoke-btn"`) {
+		t.Error("Bulk revoke button needs the id the enable/disable logic looks up")
+	}
+}
+
+func TestBulkActionsBar_DeleteHiddenForSlave(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.role = "slave"
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	oAdmin.indexPageHandler(w, req)
+
+	if strings.Contains(w.Body.String(), "Delete Selected") {
+		t.Error("Slave should NOT offer a 'Delete Selected' button")
+	}
+}
+
+// =============================================================================
+// visibleUsers Tests
+// =============================================================================
+
+func TestVisibleUsers_HideRevokedKeepsExpired(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "activeuser", AccountStatus: "Active"},
+		{Identity: "revokeduser", AccountStatus: "Revoked"},
+		{Identity: "expireduser", AccountStatus: "Expired"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	req.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "true"})
+
+	var got []string
+	for _, user := range oAdmin.visibleUsers(req) {
+		got = append(got, user.Identity)
+	}
+
+	// The toggle is labelled "Hide Revoked": an expired user still needs rotating or
+	// deleting, so hiding it leaves the operator no way to act on it.
+	want := []string{"activeuser", "expireduser"}
+	if len(got) != len(want) {
+		t.Fatalf("Expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Expected %v, got %v", want, got)
+			break
+		}
+	}
+}
+
+func TestVisibleUsers_SearchSurvivesMutation(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "alice", AccountStatus: "Active"},
+		{Identity: "bob", AccountStatus: "Active"},
+	}
+
+	// A revoke posted while the search box holds "ali" carries the term back via
+	// hx-include, so the re-rendered rows must stay filtered.
+	req := httptest.NewRequest(http.MethodPost, "/users/alice/revoke", strings.NewReader("search=ali"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := req.ParseForm(); err != nil {
+		t.Fatalf("ParseForm failed: %v", err)
+	}
+
+	users := oAdmin.visibleUsers(req)
+	if len(users) != 1 || users[0].Identity != "alice" {
+		t.Errorf("Expected the search to still match only alice, got %v", users)
+	}
+}
+
+func TestRenderUserRows_KeepsSearchAfterAction(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	dir := t.TempDir()
+	origIndex, origBackend := *indexTxtPath, *storageBackend
+	*indexTxtPath, *storageBackend = filepath.Join(dir, "index.txt"), "filesystem"
+	defer func() { *indexTxtPath, *storageBackend = origIndex, origBackend }()
+
+	if err := os.WriteFile(*indexTxtPath, []byte("V\t400101000000Z\t\t01\tunknown\t/CN=alice\nV\t400101000000Z\t\t02\tunknown\t/CN=bob\n"), 0o600); err != nil {
+		t.Fatalf("writing index.txt: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/users/alice/revoke?search=ali", nil)
+	w := httptest.NewRecorder()
+	oAdmin.renderUserRows(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "alice") {
+		t.Error("Re-rendered rows should still contain the searched user")
+	}
+	if strings.Contains(body, "bob") {
+		t.Error("Re-rendered rows dropped the search filter and listed every user")
+	}
+}
+
+// =============================================================================
+// userDelete guard Tests
+// =============================================================================
+
+func TestUserDelete_RefusesActiveCertificate(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	dir := t.TempDir()
+	origIndex, origBackend := *indexTxtPath, *storageBackend
+	*indexTxtPath, *storageBackend = filepath.Join(dir, "index.txt"), "filesystem"
+	defer func() { *indexTxtPath, *storageBackend = origIndex, origBackend }()
+
+	// Flag V with an expiry in 2040: an active certificate.
+	index := "V\t400101000000Z\t\t01\tunknown\t/CN=activeuser\n"
+	if err := os.WriteFile(*indexTxtPath, []byte(index), 0o600); err != nil {
+		t.Fatalf("writing index.txt: %v", err)
+	}
+
+	err, msg := oAdmin.userDelete("activeuser")
+	if err == nil {
+		t.Fatal("Deleting an active user must be refused: the entry is only renamed, so the certificate would stay valid and never enter the CRL")
+	}
+
+	var inputErr userInputError
+	if !errors.As(err, &inputErr) {
+		t.Errorf("Expected a userInputError so the handler answers 4xx, got %T", err)
+	}
+	if httpStatusFor(err) != http.StatusUnprocessableEntity {
+		t.Errorf("Expected status 422, got %d", httpStatusFor(err))
+	}
+	if !strings.Contains(msg, "revoke") {
+		t.Errorf("Message should tell the operator to revoke first, got %q", msg)
+	}
+
+	// The refusal has to happen before anything is written.
+	after, readErr := os.ReadFile(*indexTxtPath)
+	if readErr != nil {
+		t.Fatalf("reading index.txt: %v", readErr)
+	}
+	if string(after) != index {
+		t.Errorf("index.txt was modified by a refused delete:\n%s", after)
+	}
+}
+
+func TestUserDelete_UnknownUserStillNotFound(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	dir := t.TempDir()
+	origIndex, origBackend := *indexTxtPath, *storageBackend
+	*indexTxtPath, *storageBackend = filepath.Join(dir, "index.txt"), "filesystem"
+	defer func() { *indexTxtPath, *storageBackend = origIndex, origBackend }()
+
+	if err := os.WriteFile(*indexTxtPath, nil, 0o600); err != nil {
+		t.Fatalf("writing index.txt: %v", err)
+	}
+
+	err, _ := oAdmin.userDelete("ghost")
+	var missing notFoundError
+	if !errors.As(err, &missing) {
+		t.Errorf("Expected notFoundError for an unknown user, got %T (%v)", err, err)
+	}
+}
+
+func TestUserAccountStatus(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	dir := t.TempDir()
+	origIndex, origBackend := *indexTxtPath, *storageBackend
+	*indexTxtPath, *storageBackend = filepath.Join(dir, "index.txt"), "filesystem"
+	defer func() { *indexTxtPath, *storageBackend = origIndex, origBackend }()
+
+	index := "V\t400101000000Z\t\t01\tunknown\t/CN=activeuser\n" +
+		"V\t200101000000Z\t\t02\tunknown\t/CN=expireduser\n" +
+		"R\t400101000000Z\t250101000000Z\t03\tunknown\t/CN=revokeduser\n"
+	if err := os.WriteFile(*indexTxtPath, []byte(index), 0o600); err != nil {
+		t.Fatalf("writing index.txt: %v", err)
+	}
+
+	for username, want := range map[string]string{
+		"activeuser":  "Active",
+		"expireduser": "Expired",
+		"revokeduser": "Revoked",
+		"ghost":       "",
+	} {
+		if got := oAdmin.userAccountStatus(username); got != want {
+			t.Errorf("userAccountStatus(%q) = %q, want %q", username, got, want)
+		}
+	}
+}
+
+// =============================================================================
+// Accessibility Tests
+// =============================================================================
+
+// readStylesheet returns static/style.css, which is served from the embedded FS.
+func readStylesheet(t *testing.T) string {
+	t.Helper()
+	css, err := os.ReadFile(filepath.Join("static", "style.css"))
+	if err != nil {
+		t.Fatalf("reading stylesheet: %v", err)
+	}
+	return string(css)
+}
+
+func TestStylesheet_NoInvertingRampOnAlwaysDarkSurfaces(t *testing.T) {
+	css := readStylesheet(t)
+
+	// --gray-900 flips to near-white in the dark theme. The bulk bar and the config
+	// block are dark in both themes, so using the ramp there rendered white text on a
+	// near-white surface (1.05:1 and 1.18:1). They must use --surface-inverse.
+	for _, block := range []string{".bulk-actions-bar {", ".config-display {"} {
+		start := strings.Index(css, block)
+		if start < 0 {
+			t.Fatalf("could not find %s in the stylesheet", block)
+		}
+		body := css[start : start+strings.Index(css[start:], "}")]
+		if strings.Contains(body, "var(--gray-900)") {
+			t.Errorf("%s uses var(--gray-900), which inverts in dark mode", block)
+		}
+		if !strings.Contains(body, "var(--surface-inverse)") {
+			t.Errorf("%s should paint itself with var(--surface-inverse)", block)
+		}
+	}
+}
+
+func TestStylesheet_StatusColoursUseTextSafeTones(t *testing.T) {
+	css := readStylesheet(t)
+
+	// Every one of these put a mid tone on its own 100-level tint, measuring between
+	// 1.93:1 and 3.08:1 against a 4.5:1 requirement.
+	forbidden := []string{
+		".status-active { background: var(--success-light); color: var(--success); }",
+		".status-expired { background: var(--warning-light); color: var(--warning); }",
+		".btn-action-info { background: var(--info-light); color: var(--info); }",
+		".btn-action-danger { background: var(--danger-light); color: var(--danger); }",
+		".alert-warning { background: var(--warning-light); color: var(--warning); }",
+	}
+	for _, rule := range forbidden {
+		if strings.Contains(css, rule) {
+			t.Errorf("rule fails WCAG AA and should use a -deep tone: %s", rule)
+		}
+	}
+
+	for _, token := range []string{"--success-deep", "--warning-deep", "--danger-deep", "--info-deep"} {
+		if !strings.Contains(css, token+":") {
+			t.Errorf("expected %s to be defined", token)
+		}
+	}
+}
+
+func TestStylesheet_BootstrapColourUtilitiesOverridden(t *testing.T) {
+	css := readStylesheet(t)
+
+	// Bootstrap's .text-warning (#ffc107) is used for the expiry warnings and measured
+	// 1.46:1 on a warning stat card, making the most urgent copy the least readable.
+	for _, rule := range []string{".text-warning {", ".text-danger {"} {
+		if !strings.Contains(css, rule) {
+			t.Errorf("expected %s to be overridden with a text-safe tone", rule)
+		}
+	}
+}
+
+func TestStylesheet_HasFocusAndReducedMotion(t *testing.T) {
+	css := readStylesheet(t)
+
+	if !strings.Contains(css, ":focus-visible") {
+		t.Error("stylesheet defines no focus styling at all")
+	}
+	if !strings.Contains(css, "prefers-reduced-motion") {
+		t.Error("stylesheet does not honour prefers-reduced-motion")
+	}
+	// The bar used to animate `bottom`, forcing layout every frame, and bottom:-80px
+	// peeked back into view once the buttons wrapped.
+	if strings.Contains(css, "bottom: -80px") {
+		t.Error("bulk bar should be hidden by a transform, not a negative offset")
+	}
+	if strings.Contains(css, "transition: bottom") {
+		t.Error("bulk bar should not transition a layout property")
+	}
+}
+
+func TestStylesheet_NoDeadRules(t *testing.T) {
+	css := readStylesheet(t)
+
+	// These class names appear in no template. .empty-state-inline, which templates do
+	// use, had no rules at all.
+	for _, dead := range []string{".action-btn {", ".skeleton {", ".empty-state-icon {"} {
+		if strings.Contains(css, dead) {
+			t.Errorf("%s is not used by any template", dead)
+		}
+	}
+	if !strings.Contains(css, ".empty-state-inline {") {
+		t.Error(".empty-state-inline is rendered by user_rows.html and needs styling")
+	}
+}
+
+func TestIndexPage_InteractiveElementsAreAccessible(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.role = "master"
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	oAdmin.indexPageHandler(w, req)
+	body := w.Body.String()
+
+	// Select-all belonged in the column header it controls, which was an empty <th>.
+	if !strings.Contains(body, `aria-label="Select all listed users"`) {
+		t.Error("select-all checkbox needs an accessible name")
+	}
+	if strings.Contains(body, `<th scope="col" class="col-checkbox"></th>`) {
+		t.Error("the checkbox column header should hold the select-all control")
+	}
+
+	// htmx row swaps were silent for assistive tech.
+	if !strings.Contains(body, `aria-live="polite"`) {
+		t.Error("row count should be a live region so list changes are announced")
+	}
+}
+
+func TestModals_HaveDialogSemantics(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	modals := map[string]map[string]interface{}{
+		"modal_create":   {"Modules": []string{"core"}},
+		"modal_delete":   {"Username": "john"},
+		"modal_rotate":   {"Username": "john", "Modules": []string{"core"}},
+		"modal_password": {"Username": "john"},
+	}
+
+	for name, data := range modals {
+		w := httptest.NewRecorder()
+		if err := oAdmin.htmlTemplates.ExecuteTemplate(w, name, data); err != nil {
+			t.Fatalf("%s: template execution failed: %v", name, err)
+		}
+		body := w.Body.String()
+
+		for _, attr := range []string{`role="dialog"`, `aria-modal="true"`, `aria-labelledby="modal-title"`, `id="modal-title"`} {
+			if !strings.Contains(body, attr) {
+				t.Errorf("%s is missing %s, so it is not announced as a dialog", name, attr)
+			}
+		}
+		if !strings.Contains(body, `aria-label="Close"`) {
+			t.Errorf("%s close button is icon-only and needs an accessible name", name)
+		}
+	}
+}
+
+func TestUserRows_CheckboxHasHitArea(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users":      []OpenvpnClient{{Identity: "alice", AccountStatus: "Active"}},
+		"ServerRole": "master",
+		"Modules":    []string{"core"},
+		"Filtered":   false,
+	})
+	if err != nil {
+		t.Fatalf("Template execution failed: %v", err)
+	}
+
+	// A bare 16px checkbox is the smallest target in the UI and the whole bulk flow
+	// depends on it; the label supplies a 36px hit area.
+	if !strings.Contains(w.Body.String(), `<label class="row-select">`) {
+		t.Error("row checkbox should sit in a .row-select label for a usable hit area")
+	}
+}
+
+func TestFiltersActive(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	plain := httptest.NewRequest(http.MethodGet, "/users", nil)
+	if oAdmin.filtersActive(plain) {
+		t.Error("a bare request has no filters active")
+	}
+
+	searched := httptest.NewRequest(http.MethodGet, "/users?search=ali", nil)
+	if !oAdmin.filtersActive(searched) {
+		t.Error("a search term counts as an active filter")
+	}
+
+	hidden := httptest.NewRequest(http.MethodGet, "/users", nil)
+	hidden.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "true"})
+	if !oAdmin.filtersActive(hidden) {
+		t.Error("hideRevoked counts as an active filter")
+	}
+
+	shown := httptest.NewRequest(http.MethodGet, "/users", nil)
+	shown.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "false"})
+	if oAdmin.filtersActive(shown) {
+		t.Error("hideRevoked=false is not an active filter")
+	}
+}
+
+func TestHxToast_AlsoSignalsRefresh(t *testing.T) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(hxToast("User alice revoked", "warn")), &payload); err != nil {
+		t.Fatalf("HX-Trigger payload is not valid JSON: %v", err)
+	}
+
+	toast, ok := payload["showToast"].(map[string]interface{})
+	if !ok {
+		t.Fatal("payload should still carry the toast")
+	}
+	if toast["message"] != "User alice revoked" || toast["type"] != "warn" {
+		t.Errorf("unexpected toast contents: %v", toast)
+	}
+
+	// The summary cards are bound to `refresh from:body`. With the 15s poll removed
+	// nothing else fires it, so a mutation that omits this leaves stale counts on screen.
+	if payload["refresh"] != true {
+		t.Error("a successful mutation must also trigger a refresh so the stat cards update")
+	}
+}
+
+// =============================================================================
+// Management interface Tests
+// =============================================================================
+
+func TestMgmtGetActiveClients_SkipsUnreachableServerAndKeepsGoing(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	// A listener that answers like the OpenVPN management interface, counting how often
+	// it actually gets dialled.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	var mu sync.Mutex
+	dials := 0
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			dials++
+			mu.Unlock()
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = c.Write([]byte("INFO: OpenVPN Management Interface, type 'help' for more info\r\n"))
+				buf := make([]byte, 256)
+				_, _ = c.Read(buf) // the "status 1" request
+				_, _ = c.Write([]byte("TITLE\tOpenVPN\r\nEND\r\n"))
+			}(conn)
+		}
+	}()
+
+	// One reachable server, one with nothing listening. mgmtInterfaces is a map and Go
+	// randomises iteration order, so the old `break` on a dial failure skipped the
+	// reachable server roughly half the time - nondeterministically zeroing out its
+	// clients. Repeat enough that ordering cannot hide it.
+	oAdmin.mgmtInterfaces = map[string]string{
+		"down": "127.0.0.1:1",
+		"up":   listener.Addr().String(),
+	}
+
+	const rounds = 20
+	for i := 0; i < rounds; i++ {
+		done := make(chan struct{})
+		go func() {
+			oAdmin.mgmtGetActiveClients()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("mgmtGetActiveClients did not return: an unreachable server must not stall it")
+		}
+	}
+
+	mu.Lock()
+	got := dials
+	mu.Unlock()
+	if got != rounds {
+		t.Errorf("reachable server was dialled %d/%d times; an unreachable peer must not "+
+			"abort the loop", got, rounds)
+	}
+}
+
+func TestMgmtRead_DoesNotBlockOnASilentSocket(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	// Accepts the connection and then says nothing recognisable. mgmtRead only stops on a
+	// sentinel ("END", "SUCCESS:", ...), so without a read deadline it blocks for ever -
+	// and it is now called while serving a mutation.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		// Hold the connection open without ever sending a sentinel.
+		time.Sleep(30 * time.Second)
+		conn.Close()
+	}()
+
+	conn, err := net.DialTimeout("tcp", listener.Addr().String(), mgmtDialTimeout)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	done := make(chan string, 1)
+	go func() { done <- oAdmin.mgmtRead(conn) }()
+
+	select {
+	case <-done:
+	case <-time.After(mgmtReadTimeout + 5*time.Second):
+		t.Fatal("mgmtRead blocked past its read deadline on a silent socket")
+	}
+}
+
+func TestRenderUserRows_RefreshesConnectionData(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	dir := t.TempDir()
+	origIndex, origBackend := *indexTxtPath, *storageBackend
+	*indexTxtPath, *storageBackend = filepath.Join(dir, "index.txt"), "filesystem"
+	defer func() { *indexTxtPath, *storageBackend = origIndex, origBackend }()
+
+	if err := os.WriteFile(*indexTxtPath, []byte("V\t400101000000Z\t\t01\tunknown\t/CN=alice\n"), 0o600); err != nil {
+		t.Fatalf("writing index.txt: %v", err)
+	}
+
+	// Stale connection data: alice looks online, but nothing is actually connected.
+	oAdmin.activeClients = []clientStatus{{CommonName: "alice"}}
+	// No reachable management interface, so a refresh must clear it rather than keep it.
+	oAdmin.mgmtInterfaces = map[string]string{"main": "127.0.0.1:1"}
+
+	req := httptest.NewRequest(http.MethodPost, "/users/alice/revoke", nil)
+	w := httptest.NewRecorder()
+	oAdmin.renderUserRows(w, req)
+
+	// Certificate data comes from disk; connection data must be re-read at the same time,
+	// or the row shows a fresh status next to a stale Online badge.
+	if len(oAdmin.activeClients) != 0 {
+		t.Errorf("expected connection data to be refreshed, still holding %v", oAdmin.activeClients)
+	}
+	if strings.Contains(w.Body.String(), "Online") {
+		t.Error("row still shows the Online badge from the stale connection cache")
 	}
 }

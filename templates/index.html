@@ -64,30 +64,26 @@
 
     <div class="panel-toolbar">
         <div class="toolbar-left">
-            {{if eq .ServerRole "master"}}
-            <div class="form-check">
-                <input type="checkbox" class="form-check-input" id="select-all-checkbox"
-                       onchange="toggleAllUsers(this)" title="Select all">
-            </div>
-            {{end}}
             <button type="button" class="btn btn-outline-secondary btn-sm"
+                    id="toggle-revoked-btn"
+                    aria-pressed="{{if .HideRevoked}}true{{else}}false{{end}}"
                     hx-get="/users"
                     hx-target="#user-table-body"
                     hx-swap="innerHTML"
+                    hx-include="[name='search']"
                     onclick="toggleHideRevoked()">
                 <i class="bi bi-eye{{if .HideRevoked}}-slash{{end}}"></i>
-                {{if .HideRevoked}}Show Revoked{{else}}Hide Revoked{{end}}
+                <span class="toggle-revoked-label">{{if .HideRevoked}}Show Revoked{{else}}Hide Revoked{{end}}</span>
             </button>
             <button type="button" class="btn btn-outline-secondary btn-sm"
-                    hx-get="/users"
-                    hx-target="#user-table-body"
-                    hx-swap="innerHTML"
+                    onclick="refreshUsers()"
                     title="Refresh (R)">
                 <i class="bi bi-arrow-clockwise"></i>
                 Refresh
             </button>
         </div>
         <div class="toolbar-right">
+            <span class="result-count" id="result-count" role="status" aria-live="polite"></span>
             <div class="search-wrapper">
                 <i class="bi bi-search search-icon"></i>
                 <input type="text"
@@ -114,7 +110,13 @@
                 <thead>
                     <tr>
                         {{if eq .ServerRole "master"}}
-                        <th scope="col" class="col-checkbox"></th>
+                        <th scope="col" class="col-checkbox">
+                            <label class="row-select">
+                                <input type="checkbox" class="form-check-input" id="select-all-checkbox"
+                                       onchange="toggleAllUsers(this)"
+                                       aria-label="Select all listed users">
+                            </label>
+                        </th>
                         {{end}}
                         <th scope="col" class="col-num">#</th>
                         <th scope="col">User</th>
@@ -128,6 +130,7 @@
                 <tbody id="user-table-body"
                        hx-get="/users"
                        hx-trigger="load, refresh"
+                       hx-include="[name='search']"
                        hx-swap="innerHTML">
                     <!-- User rows loaded via HTMX -->
                 </tbody>
@@ -143,9 +146,15 @@
         <i class="bi bi-check2-square me-1"></i>
         <span id="selected-count">0</span> selected
     </span>
-    <button type="button" class="btn btn-sm btn-warning" onclick="bulkRevoke()">
+    <button type="button" class="btn btn-sm btn-warning" id="bulk-revoke-btn" onclick="bulkRevoke()"
+            title="Revoke the selected active users">
         <i class="bi bi-shield-x"></i>
-        Revoke Selected
+        Revoke Selected<span id="bulk-revoke-count"></span>
+    </button>
+    <button type="button" class="btn btn-sm btn-danger" id="bulk-delete-btn" onclick="bulkDelete()"
+            title="Delete the selected revoked or expired users">
+        <i class="bi bi-trash"></i>
+        Delete Selected<span id="bulk-delete-count"></span>
     </button>
     <button type="button" class="btn btn-sm btn-outline-light" onclick="clearSelection()">
         <i class="bi bi-x-lg"></i>

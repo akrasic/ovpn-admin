@@ -1,13 +1,14 @@
 {{define "modal_ccd"}}
-<div class="modal-backdrop-custom show" onclick="if(event.target === this) closeModal()">
+<div class="modal-backdrop-custom show" role="dialog" aria-modal="true"
+     aria-labelledby="modal-title" onclick="if(event.target === this) closeModal()">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">
+                <h5 class="modal-title" id="modal-title">
                     <i class="bi bi-diagram-3 me-2"></i>
                     Client Routes
                 </h5>
-                <button type="button" class="btn-close" onclick="closeModal()"></button>
+                <button type="button" class="btn-close" aria-label="Close" onclick="closeModal()"></button>
             </div>
             <form hx-post="/users/{{.Ccd.User}}/ccd"
                   hx-target="#ccd-result"

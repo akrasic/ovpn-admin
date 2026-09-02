@@ -40,12 +40,6 @@
                 </div>
                 {{end}}
 
-                <!-- Live status indicator -->
-                <div class="live-indicator" id="live-indicator" title="Auto-refresh active">
-                    <span class="live-dot"></span>
-                    <span class="live-text">Live</span>
-                </div>
-
                 <!-- Theme toggle -->
                 <button type="button" class="btn-icon theme-toggle" id="theme-toggle" title="Toggle dark mode (Ctrl+D)">
                     <i class="bi bi-sun-fill theme-icon-light"></i>
@@ -118,6 +112,10 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Go only parses a request body for POST/PUT/PATCH, so hx-include params on a
+        // DELETE have to be sent as query parameters to survive the round trip.
+        htmx.config.methodsThatUseUrlParams = ['get', 'delete'];
+
         // =====================================================================
         // Cookie helpers
         // =====================================================================
@@ -220,8 +218,46 @@
         // =====================================================================
         // Modal helpers
         // =====================================================================
+        const MODAL_FOCUSABLE = 'input:not([type=hidden]), textarea, select, button, [href]';
+        let modalReturnFocus = null;
+
         function closeModal() {
             document.getElementById('modal-container').innerHTML = '';
+            // Hand focus back where it came from rather than dropping it on <body>.
+            modalReturnFocus?.focus();
+            modalReturnFocus = null;
+        }
+
+        function visibleFocusable(dialog) {
+            return Array.from(dialog.querySelectorAll(MODAL_FOCUSABLE))
+                .filter(el => !el.disabled && el.offsetParent !== null);
+        }
+
+        // Called after htmx swaps #modal-container. Without this, focus stayed on the row
+        // button behind the dialog and Tab walked the page underneath it.
+        function initModal() {
+            const dialog = document.querySelector('#modal-container [role="dialog"]');
+            if (!dialog) return;
+
+            modalReturnFocus = document.activeElement;
+
+            const firstField = dialog.querySelector('input:not([type=hidden]), textarea, select');
+            (firstField || visibleFocusable(dialog)[0])?.focus();
+
+            dialog.addEventListener('keydown', function(e) {
+                if (e.key !== 'Tab') return;
+                const focusable = visibleFocusable(dialog);
+                if (focusable.length === 0) return;
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+                if (e.shiftKey && document.activeElement === first) {
+                    e.preventDefault();
+                    last.focus();
+                } else if (!e.shiftKey && document.activeElement === last) {
+                    e.preventDefault();
+                    first.focus();
+                }
+            });
         }
 
         // =====================================================================
@@ -259,50 +295,44 @@
         // =====================================================================
         // Toggle revoked filter
         // =====================================================================
+        function setHideRevoked(hidden) {
+            setCookie('hideRevoked', hidden);
+            // The button is server-rendered and only the tbody gets swapped, so its own
+            // label has to be updated here or it stays stale until a full page load.
+            const button = document.getElementById('toggle-revoked-btn');
+            if (!button) return;
+            button.setAttribute('aria-pressed', String(hidden));
+            button.querySelector('.toggle-revoked-label').textContent =
+                hidden ? 'Show Revoked' : 'Hide Revoked';
+            button.querySelector('i').className = hidden ? 'bi bi-eye-slash' : 'bi bi-eye';
+        }
+
         function toggleHideRevoked() {
-            const current = getCookie('hideRevoked') === 'true';
-            setCookie('hideRevoked', !current);
+            setHideRevoked(getCookie('hideRevoked') !== 'true');
             return true;
         }
 
-        // =====================================================================
-        // Auto-refresh for live status
-        // =====================================================================
-        let autoRefreshInterval = null;
-        const AUTO_REFRESH_MS = 15000; // 15 seconds
-
-        function startAutoRefresh() {
-            if (autoRefreshInterval) return;
-            autoRefreshInterval = setInterval(() => {
-                const tableBody = document.getElementById('user-table-body');
-                if (tableBody) {
-                    htmx.trigger(tableBody, 'refresh');
-                }
-                // Update stats
-                const statsContainer = document.querySelector('.stats-grid');
-                if (statsContainer) {
-                    htmx.ajax('GET', '/stats', {target: '.stats-grid', swap: 'innerHTML'});
-                }
-            }, AUTO_REFRESH_MS);
-            document.getElementById('live-indicator')?.classList.add('active');
+        // Offered by the empty state when a filter, not an absence of users, is the
+        // reason the table is empty.
+        function clearFilters() {
+            const search = document.querySelector('.search-input');
+            if (search) search.value = '';
+            setHideRevoked(false);
+            htmx.ajax('GET', '/users', { target: '#user-table-body', swap: 'innerHTML' });
         }
 
-        function stopAutoRefresh() {
-            if (autoRefreshInterval) {
-                clearInterval(autoRefreshInterval);
-                autoRefreshInterval = null;
-            }
-            document.getElementById('live-indicator')?.classList.remove('active');
-        }
-
-        function toggleAutoRefresh() {
-            if (autoRefreshInterval) {
-                stopAutoRefresh();
-                showToast('Auto-refresh paused', 'info');
-            } else {
-                startAutoRefresh();
-                showToast('Auto-refresh enabled', 'success');
-            }
+        // =====================================================================
+        // Refresh
+        //
+        // Refreshing only ever happens because the operator asked for it, or because a
+        // mutation just succeeded. There is no polling: a background reload fought the
+        // search box, the row selection and any open modal.
+        // =====================================================================
+        function refreshUsers() {
+            // The row list listens for `refresh` on itself; the summary cards listen for
+            // it on body (hx-trigger="refresh from:body").
+            htmx.trigger('#user-table-body', 'refresh');
+            htmx.trigger(document.body, 'refresh');
         }
 
         // =====================================================================
@@ -310,11 +340,28 @@
         // =====================================================================
         function initKeyboardShortcuts() {
             document.addEventListener('keydown', function(e) {
-                // Ignore if typing in input/textarea
-                if (e.target.matches('input, textarea, select')) {
-                    if (e.key === 'Escape') {
+                // Escape is handled first: it used to return early when a field had focus,
+                // so Esc inside a modal only blurred the input instead of closing.
+                if (e.key === 'Escape') {
+                    if (document.querySelector('#modal-container [role="dialog"]')) {
+                        e.preventDefault();
+                        closeModal();
+                        return;
+                    }
+                    if (e.target.matches('input, textarea, select')) {
                         e.target.blur();
                     }
+                    return;
+                }
+
+                // Ignore if typing in input/textarea
+                if (e.target.matches('input, textarea, select')) {
+                    return;
+                }
+
+                // A focused button owns Enter and Space; single-letter shortcuts firing
+                // there meant an accidental refresh after every click.
+                if (e.target.closest('button, a')) {
                     return;
                 }
 
@@ -348,17 +395,12 @@
                         case 'R':
                             // Refresh
                             e.preventDefault();
-                            htmx.trigger('#user-table-body', 'refresh');
-                            showToast('Refreshing...', 'info');
+                            refreshUsers();
                             break;
                         case '?':
                             // Show shortcuts
                             e.preventDefault();
                             new bootstrap.Modal(document.getElementById('shortcuts-modal')).show();
-                            break;
-                        case 'Escape':
-                            // Close modal
-                            closeModal();
                             break;
                     }
                 }
@@ -397,62 +439,164 @@
         // =====================================================================
         // Bulk actions
         // =====================================================================
-        let selectedUsers = new Set();
+        // Maps username -> account status, so each bulk action can pick out the rows it
+        // is actually allowed to touch.
+        const selectedUsers = new Map();
 
-        function toggleUserSelection(username, checkbox) {
+        // Revoking only makes sense for a live certificate, and deleting only for one
+        // that is already out of use: a delete just drops the index entry, so deleting
+        // an active user would leave its certificate valid and absent from the CRL.
+        // The server enforces the same rule.
+        const BULK_ACTIONS = {
+            revoke: {
+                statuses: ['Active'],
+                verb: 'Revoke',
+                past: 'Revoked',
+                method: 'POST',
+                url: name => '/users/' + encodeURIComponent(name) + '/revoke',
+            },
+            delete: {
+                statuses: ['Revoked', 'Expired'],
+                verb: 'Delete',
+                past: 'Deleted',
+                method: 'DELETE',
+                url: name => '/users/' + encodeURIComponent(name),
+            },
+        };
+
+        function eligibleUsers(action) {
+            const spec = BULK_ACTIONS[action];
+            return Array.from(selectedUsers.entries())
+                .filter(([, status]) => spec.statuses.includes(status))
+                .map(([username]) => username);
+        }
+
+        function toggleUserSelection(checkbox) {
             if (checkbox.checked) {
-                selectedUsers.add(username);
+                selectedUsers.set(checkbox.dataset.username, checkbox.dataset.status);
             } else {
-                selectedUsers.delete(username);
+                selectedUsers.delete(checkbox.dataset.username);
             }
             updateBulkActions();
         }
 
         function toggleAllUsers(checkbox) {
-            const checkboxes = document.querySelectorAll('.user-checkbox');
-            checkboxes.forEach(cb => {
+            document.querySelectorAll('.user-checkbox').forEach(cb => {
                 cb.checked = checkbox.checked;
-                const username = cb.dataset.username;
                 if (checkbox.checked) {
-                    selectedUsers.add(username);
+                    selectedUsers.set(cb.dataset.username, cb.dataset.status);
                 } else {
-                    selectedUsers.delete(username);
+                    selectedUsers.delete(cb.dataset.username);
                 }
             });
             updateBulkActions();
         }
 
         function updateBulkActions() {
-            const bulkBar = document.getElementById('bulk-actions-bar');
             const countSpan = document.getElementById('selected-count');
-            if (selectedUsers.size > 0) {
-                bulkBar?.classList.add('show');
-                if (countSpan) countSpan.textContent = selectedUsers.size;
+            if (countSpan) countSpan.textContent = selectedUsers.size;
+            document.getElementById('bulk-actions-bar')?.classList.toggle('show', selectedUsers.size > 0);
+
+            // A selection can mix statuses, so each button shows how many of the selected
+            // users it would actually affect and goes inert when that is none.
+            Object.keys(BULK_ACTIONS).forEach(action => {
+                const eligible = eligibleUsers(action).length;
+                const button = document.getElementById('bulk-' + action + '-btn');
+                if (button) button.disabled = eligible === 0;
+                const label = document.getElementById('bulk-' + action + '-count');
+                if (label) label.textContent = eligible > 0 ? ' (' + eligible + ')' : '';
+            });
+        }
+
+        // Requests go out one at a time on purpose: every revoke and delete rewrites the
+        // whole of index.txt, so issuing them in parallel loses entries.
+        async function runBulkAction(action) {
+            const spec = BULK_ACTIONS[action];
+            const usernames = eligibleUsers(action);
+            if (usernames.length === 0) return;
+            if (!confirm(`${spec.verb} ${usernames.length} selected user(s)?`)) return;
+
+            const buttons = Object.keys(BULK_ACTIONS)
+                .map(name => document.getElementById('bulk-' + name + '-btn'))
+                .filter(Boolean);
+            buttons.forEach(button => button.disabled = true);
+
+            const failures = [];
+            for (const username of usernames) {
+                try {
+                    const response = await fetch(spec.url(username), { method: spec.method });
+                    // fetch only rejects on a network failure, so a 4xx/5xx has to be
+                    // checked here or a batch that failed outright reports success.
+                    if (!response.ok) {
+                        const body = (await response.text()).trim();
+                        failures.push(`${username}: ${body || 'HTTP ' + response.status}`);
+                        continue;
+                    }
+                    selectedUsers.delete(username);
+                } catch (err) {
+                    failures.push(`${username}: ${err.message}`);
+                }
+            }
+
+            updateBulkActions();
+            htmx.trigger('#user-table-body', 'refresh');
+
+            const succeeded = usernames.length - failures.length;
+            if (failures.length === 0) {
+                showToast(`${spec.past} ${succeeded} user(s)`, 'success');
+            } else if (succeeded === 0) {
+                showToast(`${spec.verb} failed for all ${failures.length} user(s) - ${failures[0]}`, 'error');
             } else {
-                bulkBar?.classList.remove('show');
+                showToast(`${spec.past} ${succeeded} of ${usernames.length}, failed - ${failures.join('; ')}`, 'warning');
             }
         }
 
         function bulkRevoke() {
-            if (selectedUsers.size === 0) return;
-            if (!confirm(`Revoke ${selectedUsers.size} selected user(s)?`)) return;
+            runBulkAction('revoke');
+        }
 
-            const promises = Array.from(selectedUsers).map(username =>
-                fetch(`/users/${encodeURIComponent(username)}/revoke`, { method: 'POST' })
-            );
-
-            Promise.all(promises).then(() => {
-                showToast(`Revoked ${selectedUsers.size} user(s)`, 'success');
-                selectedUsers.clear();
-                updateBulkActions();
-                htmx.trigger('#user-table-body', 'refresh');
-            }).catch(() => showToast('Bulk revoke failed', 'error'));
+        function bulkDelete() {
+            runBulkAction('delete');
         }
 
         function clearSelection() {
             selectedUsers.clear();
             document.querySelectorAll('.user-checkbox').forEach(cb => cb.checked = false);
-            document.getElementById('select-all-checkbox').checked = false;
+            const selectAll = document.getElementById('select-all-checkbox');
+            if (selectAll) selectAll.checked = false;
+            updateBulkActions();
+        }
+
+        // Report how many rows are listed. The element is a live region, so this doubles
+        // as the announcement for htmx swaps, which were previously silent.
+        function updateResultCount() {
+            const label = document.getElementById('result-count');
+            if (!label) return;
+            const rows = document.querySelectorAll('#user-table-body tr[id^="user-row-"]').length;
+            label.textContent = rows === 1 ? '1 user' : rows + ' users';
+        }
+
+        // The rows are re-rendered by search, by an explicit refresh and by every mutating
+        // action, all of which replace the checkboxes with unchecked ones. Put
+        // the ticks back and drop anyone who is no longer listed, so the checkboxes and
+        // the bulk bar cannot drift apart and an action can only ever hit a visible row.
+        function restoreSelection() {
+            if (selectedUsers.size === 0) return;
+
+            const visible = new Set();
+            document.querySelectorAll('.user-checkbox').forEach(cb => {
+                visible.add(cb.dataset.username);
+                if (selectedUsers.has(cb.dataset.username)) {
+                    cb.checked = true;
+                    // The status may have moved on since selection - a user just revoked
+                    // becomes eligible for delete rather than revoke.
+                    selectedUsers.set(cb.dataset.username, cb.dataset.status);
+                }
+            });
+
+            selectedUsers.forEach((_, username) => {
+                if (!visible.has(username)) selectedUsers.delete(username);
+            });
             updateBulkActions();
         }
 
@@ -466,6 +610,13 @@
         document.body.addEventListener('htmx:afterSwap', function(e) {
             // Re-initialize any dynamic elements after HTMX swap
             initPasswordInputs();
+            if (e.detail.target?.id === 'user-table-body') {
+                restoreSelection();
+                updateResultCount();
+            }
+            if (e.detail.target?.id === 'modal-container') {
+                initModal();
+            }
         });
 
         // =====================================================================
@@ -484,7 +635,6 @@
             initTheme();
             initKeyboardShortcuts();
             initPasswordInputs();
-            startAutoRefresh();
 
             // Theme toggle button
             document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
@@ -493,18 +643,6 @@
             document.getElementById('shortcuts-btn')?.addEventListener('click', () => {
                 new bootstrap.Modal(document.getElementById('shortcuts-modal')).show();
             });
-
-            // Live indicator click to toggle auto-refresh
-            document.getElementById('live-indicator')?.addEventListener('click', toggleAutoRefresh);
-        });
-
-        // Pause auto-refresh when tab is hidden
-        document.addEventListener('visibilitychange', function() {
-            if (document.hidden) {
-                stopAutoRefresh();
-            } else {
-                startAutoRefresh();
-            }
         });
     </script>
 </body>
