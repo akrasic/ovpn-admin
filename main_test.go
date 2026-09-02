@@ -1974,6 +1974,172 @@ func TestUserAccountStatus(t *testing.T) {
 }
 
 // =============================================================================
+// PKI file archiving Tests
+// =============================================================================
+
+// writePkiFile creates path with its parent directories.
+func writePkiFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// setupPkiTestDirs points easyrsaDirPath, indexTxtPath and storageBackend at a
+// temp directory and installs a stub easyrsa binary there. The stub mimics the
+// real one where these tests need it to: build-client-full refuses a name whose
+// request file exists (the behaviour under test), otherwise writes the crt/key/req
+// files and appends an index entry with serial 99; every other subcommand
+// (gen-crl) succeeds silently.
+func setupPkiTestDirs(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	origDir, origIndex, origBin, origBackend := *easyrsaDirPath, *indexTxtPath, *easyrsaBinPath, *storageBackend
+	*easyrsaDirPath = dir
+	*indexTxtPath = filepath.Join(dir, "pki", "index.txt")
+	*easyrsaBinPath = filepath.Join(dir, "easyrsa")
+	*storageBackend = "filesystem"
+	t.Cleanup(func() {
+		*easyrsaDirPath, *indexTxtPath, *easyrsaBinPath, *storageBackend = origDir, origIndex, origBin, origBackend
+	})
+
+	script := `#!/bin/sh
+if [ "$2" = "build-client-full" ]; then
+  if [ "$3" = "failuser" ]; then
+    echo "stub: refusing to issue for failuser" >&2
+    exit 1
+  fi
+  if [ -e "pki/reqs/$3.req" ]; then
+    echo "Request file already exists. Aborting build to avoid overwriting this file." >&2
+    exit 1
+  fi
+  mkdir -p pki/issued pki/private pki/reqs
+  echo crt > "pki/issued/$3.crt"
+  echo key > "pki/private/$3.key"
+  echo req > "pki/reqs/$3.req"
+  printf 'V\t400101000000Z\t\t99\tunknown\t/CN=%s\n' "$3" >> pki/index.txt
+fi
+exit 0
+`
+	if err := os.WriteFile(*easyrsaBinPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write easyrsa stub: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "pki"), 0o700); err != nil {
+		t.Fatalf("mkdir pki: %v", err)
+	}
+	return dir
+}
+
+func TestArchiveUserPkiFiles_MovesLeftoverFilesAside(t *testing.T) {
+	dir := setupPkiTestDirs(t)
+
+	for _, f := range []string{"pki/issued/u1.crt", "pki/private/u1.key", "pki/reqs/u1.req"} {
+		writePkiFile(t, filepath.Join(dir, f), "x")
+	}
+
+	archiveUserPkiFiles("u1", "0A")
+
+	for _, f := range []string{"pki/issued/u1.crt", "pki/private/u1.key", "pki/reqs/u1.req"} {
+		if fExist(filepath.Join(dir, f)) {
+			t.Errorf("%s should have been moved aside", f)
+		}
+	}
+	for _, f := range []string{"pki/revoked/certs_by_serial/0A.crt", "pki/revoked/private_by_serial/0A.key", "pki/revoked/reqs_by_serial/0A.req"} {
+		if !fExist(filepath.Join(dir, f)) {
+			t.Errorf("%s should exist after archiving", f)
+		}
+	}
+}
+
+func TestUserDelete_ExpiredUserFreesTheUsername(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	dir := setupPkiTestDirs(t)
+
+	// An expired certificate: easyrsa revoke never ran for it, so its files are
+	// still filed under the username.
+	writePkiFile(t, *indexTxtPath, "V\t200101000000Z\t\t02\tunknown\t/CN=olduser\n")
+	for _, f := range []string{"pki/issued/olduser.crt", "pki/private/olduser.key", "pki/reqs/olduser.req"} {
+		writePkiFile(t, filepath.Join(dir, f), "x")
+	}
+
+	if err, msg := oAdmin.userDelete("olduser"); err != nil {
+		t.Fatalf("deleting an expired user should succeed, got %v (%s)", err, msg)
+	}
+	if fExist(filepath.Join(dir, "pki/reqs/olduser.req")) {
+		t.Error("delete left pki/reqs/olduser.req behind: easyrsa would refuse to ever issue for this name again")
+	}
+	if !fExist(filepath.Join(dir, "pki/revoked/reqs_by_serial/02.req")) {
+		t.Error("the request file should be archived by serial, matching easyrsa revoke's own layout")
+	}
+
+	// The point of archiving: the same username can be created again.
+	created, msg, err := oAdmin.userCreate("olduser", "")
+	if !created {
+		t.Fatalf("recreating a deleted user failed: %v (%s)", err, msg)
+	}
+}
+
+func TestUserRotate_ReplacesCertificateDespiteExistingFiles(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	dir := setupPkiTestDirs(t)
+
+	// An active certificate holds its files under the username for as long as it
+	// lives, so a rotate must move them aside before it can issue the replacement.
+	writePkiFile(t, *indexTxtPath, "V\t400101000000Z\t\t01\tunknown\t/CN=vpnuser\n")
+	for _, f := range []string{"pki/issued/vpnuser.crt", "pki/private/vpnuser.key", "pki/reqs/vpnuser.req"} {
+		writePkiFile(t, filepath.Join(dir, f), "old")
+	}
+
+	if err, msg := oAdmin.userRotate("vpnuser", ""); err != nil {
+		t.Fatalf("rotate failed: %v (%s)", err, msg)
+	}
+
+	index := fRead(*indexTxtPath)
+	if !strings.Contains(index, "/CN=vpnuser") {
+		t.Error("rotate should leave an entry under the original name")
+	}
+	if !strings.Contains(index, "/CN=REVOKED-vpnuser-") {
+		t.Error("rotate should rename the old entry out of the way")
+	}
+	if !fExist(filepath.Join(dir, "pki/revoked/reqs_by_serial/01.req")) {
+		t.Error("the old request file should be archived by its serial")
+	}
+	if data := fRead(filepath.Join(dir, "pki/issued/vpnuser.crt")); strings.TrimSpace(data) != "crt" {
+		t.Errorf("pki/issued/vpnuser.crt should be the newly issued certificate, got %q", data)
+	}
+}
+
+func TestUserRotate_RestoresOldFilesWhenCreateFails(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	dir := setupPkiTestDirs(t)
+
+	// The stub easyrsa refuses to issue for this specific name, standing in for
+	// any build-client-full failure mid-rotate.
+	writePkiFile(t, *indexTxtPath, "V\t400101000000Z\t\t01\tunknown\t/CN=failuser\n")
+	for _, f := range []string{"pki/issued/failuser.crt", "pki/private/failuser.key", "pki/reqs/failuser.req"} {
+		writePkiFile(t, filepath.Join(dir, f), "old")
+	}
+
+	err, _ := oAdmin.userRotate("failuser", "")
+	if err == nil {
+		t.Fatal("rotate should fail when the replacement certificate cannot be issued")
+	}
+
+	if !strings.Contains(fRead(*indexTxtPath), "/CN=failuser") {
+		t.Error("a failed rotate should restore the original index entry")
+	}
+	for _, f := range []string{"pki/issued/failuser.crt", "pki/private/failuser.key", "pki/reqs/failuser.req"} {
+		if data := fRead(filepath.Join(dir, f)); strings.TrimSpace(data) != "old" {
+			t.Errorf("%s should hold the original certificate files after a failed rotate, got %q", f, data)
+		}
+	}
+}
+
+// =============================================================================
 // Accessibility Tests
 // =============================================================================
 

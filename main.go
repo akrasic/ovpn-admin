@@ -1531,9 +1531,14 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string, er
 			// The certificate exists but the account has no password, so it could never
 			// authenticate. Roll the certificate back rather than leave a half-created user.
 			log.Errorf("userCreate: openvpn-user create(%s): %v", username, err)
+			// The fresh certificate reads Active, which userDelete refuses, so it
+			// must be revoked first. Both steps are best effort: the password
+			// record may never have been written, so a failure to purge it is not
+			// necessarily a problem.
+			if rbErr, _ := oAdmin.userRevoke(username); rbErr != nil {
+				log.Warnf("userCreate: rollback revoke of %s reported: %v", username, rbErr)
+			}
 			if rbErr, _ := oAdmin.userDelete(username); rbErr != nil {
-				// Best effort: the password record may never have been written, so a
-				// failure to purge it is not necessarily a problem.
 				log.Warnf("userCreate: rollback of %s reported: %v", username, rbErr)
 			}
 			return false, fmt.Sprintf("Could not set password for user %q: %s", username, firstLine(out, err)), err
@@ -1830,12 +1835,18 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 				log.Error(err)
 			}
 
+			// The old certificate is still filed under this name, and easyrsa
+			// refuses build-client-full while those files exist - the rename
+			// above only freed the name inside the index.
+			archiveUserPkiFiles(username, oldUserSerial)
+
 			if *authByPassword {
 				logCmd("openvpn-user", "delete", "--force", "--db.path", *authDatabase, "--user", username)
 			}
 
 			userCreated, userCreateMessage, userCreateErr := oAdmin.userCreate(username, newPassword)
 			if !userCreated {
+				restoreUserPkiFiles(username, oldUserSerial)
 				usersFromIndexTxt = indexTxtParser(fRead(*indexTxtPath))
 				for i := range usersFromIndexTxt {
 					if usersFromIndexTxt[i].SerialNumber == oldUserSerial {
@@ -1880,6 +1891,51 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 	return notFoundError{username}, fmt.Sprintf("User %q not found", username)
 }
 
+// pkiArchiveFilePairs maps the per-name files easyrsa keeps for username onto
+// the by-serial locations under pki/revoked - the same layout `easyrsa revoke`
+// uses when it moves a revoked certificate aside.
+func pkiArchiveFilePairs(username, serial string) [][2]string {
+	pki := *easyrsaDirPath + "/pki"
+	return [][2]string{
+		{pki + "/issued/" + username + ".crt", pki + "/revoked/certs_by_serial/" + serial + ".crt"},
+		{pki + "/private/" + username + ".key", pki + "/revoked/private_by_serial/" + serial + ".key"},
+		{pki + "/reqs/" + username + ".req", pki + "/revoked/reqs_by_serial/" + serial + ".req"},
+	}
+}
+
+// archiveUserPkiFiles moves any files still stored under username's name out of
+// the way. easyrsa refuses build-client-full for a name whose request file
+// exists, and only `easyrsa revoke` relocates these files itself; an expired
+// certificate never went through revoke, so deleting one would otherwise block
+// the username from ever being created again.
+func archiveUserPkiFiles(username, serial string) {
+	for _, pair := range pkiArchiveFilePairs(username, serial) {
+		if !fExist(pair[0]) {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(pair[1]), 0o700); err != nil {
+			log.Warnf("archiveUserPkiFiles: %v - recreating user %q may fail until %s is removed", err, username, pair[0])
+			continue
+		}
+		if err := fMove(pair[0], pair[1]); err != nil {
+			log.Warnf("archiveUserPkiFiles: %v - recreating user %q may fail until %s is removed", err, username, pair[0])
+		}
+	}
+}
+
+// restoreUserPkiFiles is the inverse of archiveUserPkiFiles, for a rotate whose
+// replacement certificate could not be created. A file only moves back when
+// nothing new has been written over the original name in the meantime.
+func restoreUserPkiFiles(username, serial string) {
+	for _, pair := range pkiArchiveFilePairs(username, serial) {
+		if fExist(pair[1]) && !fExist(pair[0]) {
+			if err := fMove(pair[1], pair[0]); err != nil {
+				log.Warnf("restoreUserPkiFiles: %v", err)
+			}
+		}
+	}
+}
+
 func (oAdmin *OvpnAdmin) userDelete(username string) (error, string) {
 	if checkUserExist(username) {
 		// Deleting only renames the index entry, it does not flip the certificate to
@@ -1899,9 +1955,11 @@ func (oAdmin *OvpnAdmin) userDelete(username string) (error, string) {
 			}
 		} else {
 			uniqHash := strings.Replace(uuid.New().String(), "-", "", -1)
+			var deletedSerial string
 			usersFromIndexTxt := indexTxtParser(fRead(*indexTxtPath))
 			for i := range usersFromIndexTxt {
 				if usersFromIndexTxt[i].DistinguishedName == "/CN="+username {
+					deletedSerial = usersFromIndexTxt[i].SerialNumber
 					usersFromIndexTxt[i].DistinguishedName = "/CN=REVOKED-" + username + "-" + uniqHash
 					break
 				}
@@ -1912,6 +1970,11 @@ func (oAdmin *OvpnAdmin) userDelete(username string) (error, string) {
 				log.Errorf("userDelete: write index.txt: %v", err)
 				return err, fmt.Sprintf("Could not update the certificate index for user %q: %s", username, err)
 			}
+
+			// The index no longer lists the name, but easyrsa still refuses to issue
+			// for it while these files exist. A revoked certificate had them moved by
+			// `easyrsa revoke` already; an expired one did not.
+			archiveUserPkiFiles(username, deletedSerial)
 
 			if *authByPassword {
 				if out, err := runCmd("openvpn-user", "delete", "--force", "--db.path", *authDatabase, "--user", username); err != nil {
