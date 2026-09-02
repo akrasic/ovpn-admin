@@ -9,7 +9,9 @@
     <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link href="/static/style.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.2/dist/htmx.min.js"></script>
 </head>
@@ -18,13 +20,8 @@
     <header class="app-header">
         <div class="header-content">
             <div class="header-brand">
-                <div class="brand-icon">
-                    <i class="bi bi-shield-lock-fill"></i>
-                </div>
-                <div class="brand-text">
-                    <h1>OpenVPN Admin</h1>
-                    <span class="brand-subtitle">User Management Console</span>
-                </div>
+                <i class="bi bi-shield-lock-fill brand-mark" aria-hidden="true"></i>
+                <h1>OpenVPN <span class="brand-light">Admin</span></h1>
             </div>
             <div class="header-actions">
                 {{if eq .ServerRole "slave"}}
@@ -329,10 +326,11 @@
         // search box, the row selection and any open modal.
         // =====================================================================
         function refreshUsers() {
-            // The row list listens for `refresh` on itself; the summary cards listen for
-            // it on body (hx-trigger="refresh from:body").
+            // The row list listens for `refresh` on itself and the summary cards for
+            // `refreshStats` on body. Distinct events on purpose: `refresh` bubbles up
+            // from the tbody too, so one shared name would fetch everything twice.
             htmx.trigger('#user-table-body', 'refresh');
-            htmx.trigger(document.body, 'refresh');
+            htmx.trigger(document.body, 'refreshStats');
         }
 
         // =====================================================================
@@ -359,11 +357,8 @@
                     return;
                 }
 
-                // A focused button owns Enter and Space; single-letter shortcuts firing
-                // there meant an accidental refresh after every click.
-                if (e.target.closest('button, a')) {
-                    return;
-                }
+                // The modifier chords work regardless of focus: a button left focused by
+                // a click does not use Ctrl+anything, so there is nothing to yield to.
 
                 // Ctrl+D - Toggle dark mode
                 if (e.ctrlKey && e.key === 'd') {
@@ -376,6 +371,12 @@
                 if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
                     e.preventDefault();
                     document.querySelector('.search-input')?.focus();
+                    return;
+                }
+
+                // A focused button owns Enter and Space; the single-letter shortcuts
+                // below firing there meant an accidental refresh after every click.
+                if (e.target.closest('button, a')) {
                     return;
                 }
 
@@ -539,7 +540,9 @@
             }
 
             updateBulkActions();
-            htmx.trigger('#user-table-body', 'refresh');
+            // Bulk requests go through fetch, so their HX-Trigger headers are never
+            // processed: rows AND stat cards both have to be refreshed from here.
+            refreshUsers();
 
             const succeeded = usernames.length - failures.length;
             if (failures.length === 0) {

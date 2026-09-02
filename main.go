@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -242,6 +243,10 @@ type openvpnClientConfig struct {
 }
 
 type OpenvpnClient struct {
+	// IdentityHTML is only set while a search is active: the username with the
+	// matched characters wrapped in <mark>, pre-escaped. Render-only, never synced.
+	IdentityHTML template.HTML `json:"-"`
+
 	Identity         string `json:"Identity"`
 	AccountStatus    string `json:"AccountStatus"`
 	ExpirationDate   string `json:"ExpirationDate"`
@@ -428,10 +433,85 @@ func (oAdmin *OvpnAdmin) extractUsername(r *http.Request) string {
 	return r.FormValue("username")
 }
 
+// fuzzyMatch matches needle against haystack the way a filter box is used: every
+// character of needle must appear in haystack in the same order, but not
+// necessarily adjacent, compared case-insensitively. It returns a ranking score
+// and the matched rune positions for highlighting. A prefix beats a plain
+// substring, a substring beats a scattered subsequence, and earlier, tighter
+// matches beat later, looser ones.
+func fuzzyMatch(needle, haystack string) (int, []int, bool) {
+	n := []rune(strings.ToLower(needle))
+	h := []rune(strings.ToLower(haystack))
+	if len(n) == 0 {
+		return 0, nil, true
+	}
+	if len(n) > len(h) {
+		return 0, nil, false
+	}
+
+	// A contiguous match is both the strongest signal and the clearest highlight.
+	for start := 0; start+len(n) <= len(h); start++ {
+		if string(h[start:start+len(n)]) == string(n) {
+			positions := make([]int, len(n))
+			for i := range positions {
+				positions[i] = start + i
+			}
+			if start == 0 {
+				return 1000, positions, true
+			}
+			return 800 - start, positions, true
+		}
+	}
+
+	// Otherwise a subsequence, matched greedily left to right.
+	positions := make([]int, 0, len(n))
+	next := 0
+	for i, r := range h {
+		if next < len(n) && r == n[next] {
+			positions = append(positions, i)
+			next++
+		}
+	}
+	if next < len(n) {
+		return 0, nil, false
+	}
+	spread := positions[len(positions)-1] - positions[0] + 1
+	return 500 - positions[0]*2 - (spread-len(n))*3, positions, true
+}
+
+// highlightIdentity renders identity with the runes at positions wrapped in
+// <mark>, escaping every character itself, so a row can show why it matched
+// without the username ever being treated as markup.
+func highlightIdentity(identity string, positions []int) template.HTML {
+	matched := make(map[int]bool, len(positions))
+	for _, p := range positions {
+		matched[p] = true
+	}
+	var b strings.Builder
+	open := false
+	for i, r := range []rune(identity) {
+		if matched[i] != open {
+			if open {
+				b.WriteString("</mark>")
+			} else {
+				b.WriteString("<mark>")
+			}
+			open = matched[i]
+		}
+		b.WriteString(template.HTMLEscapeString(string(r)))
+	}
+	if open {
+		b.WriteString("</mark>")
+	}
+	return template.HTML(b.String())
+}
+
 // visibleUsers applies the two filters the toolbar exposes - the hideRevoked cookie and
-// the search box - to the client list. Both the plain list request and the re-render that
-// follows a mutation go through here, so an action taken while a filter is active does not
-// reset the table to every user.
+// the search box - to the client list. The search is fuzzy: characters must appear in
+// order but not adjacent, results come back best match first with the matched characters
+// marked for highlighting. Both the plain list request and the re-render that follows a
+// mutation go through here, so an action taken while a filter is active does not reset
+// the table to every user.
 func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
 	users := oAdmin.getClients()
 
@@ -455,14 +535,23 @@ func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
 	// FormValue covers the query string on a GET and the posted body on a mutation, which
 	// is how hx-include delivers the term back to us.
 	if search := r.FormValue("search"); search != "" {
-		needle := strings.ToLower(search)
-		filtered := make([]OpenvpnClient, 0, len(users))
+		type match struct {
+			user  OpenvpnClient
+			score int
+		}
+		matches := make([]match, 0, len(users))
 		for _, user := range users {
-			if strings.Contains(strings.ToLower(user.Identity), needle) {
-				filtered = append(filtered, user)
+			if score, positions, ok := fuzzyMatch(search, user.Identity); ok {
+				user.IdentityHTML = highlightIdentity(user.Identity, positions)
+				matches = append(matches, match{user, score})
 			}
 		}
-		users = filtered
+		// Best match first; the stable sort keeps the index order between equals.
+		sort.SliceStable(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+		users = make([]OpenvpnClient, len(matches))
+		for i, m := range matches {
+			users[i] = m.user
+		}
 	}
 
 	return users
@@ -1600,20 +1689,21 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string, er
 	return true, ucErr, nil
 }
 
-// hxToast builds an HX-Trigger header value for the client-side toast. The payload is
-// JSON-encoded rather than concatenated: usernames and command output can contain
-// quotes or backslashes, which would otherwise break out of the JSON string.
 // hxToast builds the HX-Trigger payload sent after a successful mutation: the toast to
-// show, plus a `refresh` event. The summary cards are bound to `refresh from:body`, and
-// nothing else fires it now that the 15s poll is gone - without this they would keep
-// showing pre-mutation counts until the operator hit Refresh.
+// show, plus a `refreshStats` event for the summary cards (bound to
+// `refreshStats from:body`), which nothing else fires now that the 15s poll is gone.
+// The event is deliberately NOT the row list's `refresh`: it dispatches on the button
+// that made the request and bubbles up through the tbody, so using `refresh` made every
+// row action fire a second GET /users whose swap raced the mutation's own response.
+// The payload is JSON-encoded rather than concatenated: usernames and command output
+// can contain quotes or backslashes, which would otherwise break out of the string.
 func hxToast(message, level string) string {
 	payload := map[string]interface{}{
 		"showToast": map[string]string{
 			"message": message,
 			"type":    level,
 		},
-		"refresh": true,
+		"refreshStats": true,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

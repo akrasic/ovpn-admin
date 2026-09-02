@@ -13,6 +13,7 @@
             <form hx-post="/users"
                   hx-target="#user-table-body"
                   hx-swap="innerHTML"
+                  hx-include="[name='search']"
                   hx-on::after-request="if(event.detail.successful) closeModal()">
                 <div class="modal-body">
                     <div class="mb-3">

@@ -292,17 +292,17 @@ func TestIndexPageHandler_StatsDisplayed(t *testing.T) {
 	body := w.Body.String()
 
 	// Verify stat cards are present
-	if !strings.Contains(body, "Total Users") {
-		t.Error("Response should contain 'Total Users' stat")
+	if !strings.Contains(body, "Total users") {
+		t.Error("Response should contain 'Total users' stat")
 	}
-	if !strings.Contains(body, "Active Connections") {
-		t.Error("Response should contain 'Active Connections' stat")
+	if !strings.Contains(body, "Connections") {
+		t.Error("Response should contain 'Connections' stat")
 	}
 	if !strings.Contains(body, "Revoked") {
 		t.Error("Response should contain 'Revoked' stat")
 	}
-	if !strings.Contains(body, "Expiring Soon") {
-		t.Error("Response should contain 'Expiring Soon' stat")
+	if !strings.Contains(body, "Expiring soon") {
+		t.Error("Response should contain 'Expiring soon' stat")
 	}
 }
 
@@ -780,10 +780,9 @@ func TestCSSClassesInTemplates(t *testing.T) {
 	requiredClasses := []string{
 		"app-header",
 		"header-brand",
-		"brand-icon",
+		"brand-mark",
 		"stats-grid",
 		"stat-card",
-		"stat-icon",
 		"stat-value",
 		"stat-label",
 		"panel",
@@ -815,13 +814,10 @@ func TestBootstrapIconsInTemplates(t *testing.T) {
 		t.Error("Bootstrap Icons CSS should be included")
 	}
 
-	// Verify some key icons are present
+	// Verify some key icons are present. The summary strip carries no icons by
+	// design: four figures with labels need no pictograms.
 	icons := []string{
 		"bi-shield-lock-fill", // Header icon
-		"bi-people-fill",      // Total users stat
-		"bi-wifi",             // Active connections stat
-		"bi-slash-circle",     // Revoked stat
-		"bi-clock-history",    // Expiring soon stat
 		"bi-person-badge",     // Panel title icon
 		"bi-search",           // Search icon
 	}
@@ -930,11 +926,11 @@ func TestStatsHandler(t *testing.T) {
 	if !strings.Contains(body, "stat-card") {
 		t.Error("Stats response should contain stat cards")
 	}
-	if !strings.Contains(body, "Total Users") {
-		t.Error("Stats response should contain 'Total Users'")
+	if !strings.Contains(body, "Total users") {
+		t.Error("Stats response should contain 'Total users'")
 	}
-	if !strings.Contains(body, "Active Connections") {
-		t.Error("Stats response should contain 'Active Connections'")
+	if !strings.Contains(body, "Connections") {
+		t.Error("Stats response should contain 'Connections'")
 	}
 }
 
@@ -1041,10 +1037,15 @@ func TestUserListHandler_Search(t *testing.T) {
 		t.Error("Search for 'ali' should return alice")
 	}
 	if strings.Contains(body, "bob") {
-		t.Error("Search for 'ali' should NOT return bob")
+		t.Error("Search for 'ali' should NOT return bob: no subsequence matches")
 	}
-	if strings.Contains(body, "charlie") {
-		t.Error("Search for 'ali' should NOT return charlie")
+	// The search is fuzzy: ch-a-r-l-i-e carries a, l, i in order, so charlie is a
+	// legitimate (weaker) match and must rank below alice's prefix match.
+	if !strings.Contains(body, "charlie") {
+		t.Error("Fuzzy search for 'ali' should also return charlie (a-l-i as a subsequence)")
+	}
+	if strings.Index(body, "alice") > strings.Index(body, "charlie") {
+		t.Error("alice's prefix match should rank above charlie's scattered subsequence")
 	}
 }
 
@@ -1858,6 +1859,92 @@ func TestVisibleUsers_SearchSurvivesMutation(t *testing.T) {
 	}
 }
 
+func TestFuzzyMatch_RanksPrefixOverSubstringOverSubsequence(t *testing.T) {
+	prefix, _, ok := fuzzyMatch("ali", "alice")
+	if !ok {
+		t.Fatal("prefix should match")
+	}
+	substring, _, ok := fuzzyMatch("ali", "malice")
+	if !ok {
+		t.Fatal("substring should match")
+	}
+	subsequence, positions, ok := fuzzyMatch("ale", "alice")
+	if !ok {
+		t.Fatal("subsequence should match: a-l-e appear in order in alice")
+	}
+	if prefix <= substring || substring <= subsequence {
+		t.Errorf("expected prefix (%d) > substring (%d) > subsequence (%d)", prefix, substring, subsequence)
+	}
+	if len(positions) != 3 || positions[0] != 0 || positions[1] != 1 || positions[2] != 4 {
+		t.Errorf("subsequence positions should be the matched runes, got %v", positions)
+	}
+
+	if _, _, ok := fuzzyMatch("xyz", "alice"); ok {
+		t.Error("characters out of order or absent must not match")
+	}
+	if _, _, ok := fuzzyMatch("ecila", "alice"); ok {
+		t.Error("fuzzy matching is ordered: reversed input must not match")
+	}
+	if _, _, ok := fuzzyMatch("ALICE", "alice"); !ok {
+		t.Error("matching should be case-insensitive")
+	}
+}
+
+func TestHighlightIdentity_WrapsMatchesAndEscapes(t *testing.T) {
+	got := string(highlightIdentity("a<b", []int{0, 2}))
+	want := "<mark>a</mark>&lt;<mark>b</mark>"
+	if got != want {
+		t.Errorf("highlightIdentity = %q, want %q - every non-mark character must be escaped", got, want)
+	}
+
+	// Adjacent positions merge into one mark, so the markup stays minimal.
+	got = string(highlightIdentity("alice", []int{0, 1, 2}))
+	want = "<mark>ali</mark>ce"
+	if got != want {
+		t.Errorf("highlightIdentity = %q, want %q", got, want)
+	}
+}
+
+func TestVisibleUsers_FuzzySearchRanksAndHighlights(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.setClients([]OpenvpnClient{
+		{Identity: "malice"},
+		{Identity: "bob"},
+		{Identity: "alice"},
+		{Identity: "a-team"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/users?search=ali", nil)
+	users := oAdmin.visibleUsers(req)
+
+	if len(users) != 2 {
+		t.Fatalf("expected alice and malice to match 'ali', got %v", users)
+	}
+	// alice is a prefix match and must outrank malice's mid-word substring,
+	// even though malice comes first in the stored order.
+	if users[0].Identity != "alice" || users[1].Identity != "malice" {
+		t.Errorf("expected best match first [alice malice], got [%s %s]", users[0].Identity, users[1].Identity)
+	}
+	if string(users[0].IdentityHTML) != "<mark>ali</mark>ce" {
+		t.Errorf("matched characters should be marked, got %q", users[0].IdentityHTML)
+	}
+
+	// A scattered subsequence still matches: 'atm' hits a-team.
+	req = httptest.NewRequest(http.MethodGet, "/users?search=atm", nil)
+	users = oAdmin.visibleUsers(req)
+	if len(users) != 1 || users[0].Identity != "a-team" {
+		t.Fatalf("expected the subsequence 'atm' to match only a-team, got %v", users)
+	}
+
+	// Without a search the names must render through Identity, not IdentityHTML.
+	req = httptest.NewRequest(http.MethodGet, "/users", nil)
+	for _, user := range oAdmin.visibleUsers(req) {
+		if user.IdentityHTML != "" {
+			t.Errorf("IdentityHTML should only be set while searching, got %q for %s", user.IdentityHTML, user.Identity)
+		}
+	}
+}
+
 func TestRenderUserRows_KeepsSearchAfterAction(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 
@@ -2497,10 +2584,15 @@ func TestHxToast_AlsoSignalsRefresh(t *testing.T) {
 		t.Errorf("unexpected toast contents: %v", toast)
 	}
 
-	// The summary cards are bound to `refresh from:body`. With the 15s poll removed
+	// The summary cards are bound to `refreshStats from:body`. With the 15s poll removed
 	// nothing else fires it, so a mutation that omits this leaves stale counts on screen.
-	if payload["refresh"] != true {
-		t.Error("a successful mutation must also trigger a refresh so the stat cards update")
+	// It must NOT be the row list's `refresh`: that event bubbles up through the tbody
+	// and fired a duplicate GET /users racing the mutation's own row response.
+	if payload["refreshStats"] != true {
+		t.Error("a successful mutation must also trigger refreshStats so the stat cards update")
+	}
+	if _, present := payload["refresh"]; present {
+		t.Error("hxToast must not fire `refresh`: it bubbles through the tbody and double-fetches the rows")
 	}
 }
 

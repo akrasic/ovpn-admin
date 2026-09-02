@@ -12,30 +12,21 @@
         </label>
     </td>
     {{end}}
-    <td class="col-num">{{add $index 1}}</td>
     <td>
         <div class="user-identity">
-            <strong>{{$user.Identity}}</strong>
+            <strong class="username">{{if $user.IdentityHTML}}{{$user.IdentityHTML}}{{else}}{{$user.Identity}}{{end}}</strong>
             {{if eq $user.ConnectionStatus "Connected"}}
-            <span class="badge bg-success ms-2" style="font-size: 0.65rem;">
-                <i class="bi bi-wifi"></i> Online
-            </span>
+            <span class="online-badge">Online</span>
             {{end}}
         </div>
     </td>
     <td>
         {{if eq $user.AccountStatus "Active"}}
-        <span class="status-badge status-active">
-            <i class="bi bi-check-circle-fill"></i> Active
-        </span>
+        <span class="status-badge status-active">Active</span>
         {{else if eq $user.AccountStatus "Revoked"}}
-        <span class="status-badge status-revoked">
-            <i class="bi bi-x-circle-fill"></i> Revoked
-        </span>
+        <span class="status-badge status-revoked">Revoked</span>
         {{else if eq $user.AccountStatus "Expired"}}
-        <span class="status-badge status-expired">
-            <i class="bi bi-exclamation-triangle-fill"></i> Expired
-        </span>
+        <span class="status-badge status-expired">Expired</span>
         {{else}}
         <span class="status-badge">{{$user.AccountStatus}}</span>
         {{end}}
@@ -74,7 +65,7 @@
 </tr>
 {{else}}
 <tr>
-    <td colspan="{{if eq $.ServerRole "master"}}8{{else}}7{{end}}" class="text-center py-5">
+    <td colspan="{{if eq $.ServerRole "master"}}7{{else}}6{{end}}" class="text-center py-5">
         <div class="empty-state-inline">
             {{if $.Filtered}}
             <i class="bi bi-funnel"></i>
