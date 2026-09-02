@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -90,26 +89,13 @@ func fExist(path string) bool {
 }
 
 func fRead(path string) string {
-	content, err := ioutil.ReadFile(path)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		log.Warning(err)
 		return ""
 	}
 
 	return string(content)
-}
-
-func fCreate(path string) error {
-	var _, err = os.Stat(path)
-	if os.IsNotExist(err) {
-		var file, err = os.Create(path)
-		if err != nil {
-			log.Errorln(err)
-			return err
-		}
-		defer file.Close()
-	}
-	return nil
 }
 
 // fWrite writes content to path atomically: a temporary file in the same directory is
@@ -179,11 +165,11 @@ func fCopy(src, dst string) error {
 			return fmt.Errorf("fCopy: non-regular destination file %s (%q)", dfi.Name(), dfi.Mode().String())
 		}
 		if os.SameFile(sfi, dfi) {
-			return err
+			return nil
 		}
 	}
 	if err = os.Link(src, dst); err == nil {
-		return err
+		return nil
 	}
 	in, err := os.Open(src)
 	if err != nil {
@@ -223,31 +209,32 @@ func fMove(src, dst string) error {
 }
 
 func fDownload(path, url string, basicAuth bool) error {
-	client := &http.Client{}
 	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("fDownload: %w", err)
+	}
 	if basicAuth {
 		req.SetBasicAuth(*masterBasicAuthUser, *masterBasicAuthPassword)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		return err
-	}
-
-	if resp.StatusCode != 200 {
-		log.Warnf("WARNING: Download file operation for url %s finished with status code %d\n", url, resp.StatusCode)
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	// A non-200 body is an error page, not the file. Writing it to path anyway
+	// used to hand a corrupt archive to the extraction step.
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fDownload: %s returned status %d", url, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
 
-	fCreate(path)
-	fWrite(path, string(body))
-
-	return nil
+	return fWrite(path, string(body))
 }
 
 func createArchiveFromDir(dir, path string) error {
@@ -321,51 +308,61 @@ func createArchiveFromDir(dir, path string) error {
 	return nil
 }
 
+// extractFromArchive unpacks a tar.gz into path. Every failure is returned, not
+// fatal: the archive arrives over the network from the master, and a corrupt or
+// truncated download must not take the slave daemon down with it.
 func extractFromArchive(archive, path string) error {
-	// Open the file which will be written into the archive
 	file, err := os.Open(archive)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	// Write file header to the tar archive
 	uncompressedStream, err := gzip.NewReader(file)
 	if err != nil {
-		log.Fatal("extractFromArchive(): NewReader failed")
+		return fmt.Errorf("extractFromArchive: %s is not a gzip archive: %w", archive, err)
 	}
 
 	tarReader := tar.NewReader(uncompressedStream)
 
-	for true {
+	for {
 		header, err := tarReader.Next()
-
 		if err == io.EOF {
 			break
 		}
-
 		if err != nil {
-			log.Fatalf("extractFromArchive: Next() failed: %s", err.Error())
+			return fmt.Errorf("extractFromArchive: %s: %w", archive, err)
+		}
+
+		// Entry names come off the wire, so they must not be able to address
+		// anything outside the target directory ("../" and friends).
+		target := filepath.Join(path, header.Name)
+		if target != filepath.Clean(path) && !strings.HasPrefix(target, filepath.Clean(path)+string(os.PathSeparator)) {
+			return fmt.Errorf("extractFromArchive: entry %q escapes %s", header.Name, path)
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.Mkdir(path+"/"+header.Name, 0755); err != nil {
-				log.Fatalf("extractFromArchive: Mkdir() failed: %s", err.Error())
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return fmt.Errorf("extractFromArchive: %w", err)
 			}
 		case tar.TypeReg:
-			outFile, err := os.Create(path + "/" + header.Name)
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("extractFromArchive: %w", err)
+			}
+			outFile, err := os.Create(target)
 			if err != nil {
-				log.Fatalf("extractFromArchive: Create() failed: %s", err.Error())
+				return fmt.Errorf("extractFromArchive: %w", err)
 			}
 			if _, err := io.Copy(outFile, tarReader); err != nil {
-				log.Fatalf("extractFromArchive: Copy() failed: %s", err.Error())
+				outFile.Close()
+				return fmt.Errorf("extractFromArchive: %s: %w", header.Name, err)
 			}
-			outFile.Close()
-
+			if err := outFile.Close(); err != nil {
+				return fmt.Errorf("extractFromArchive: %w", err)
+			}
 		default:
-			log.Fatalf(
-				"extractFromArchive: unknown type: %c in %s", header.Typeflag, header.Name)
+			return fmt.Errorf("extractFromArchive: unsupported entry type %c for %s", header.Typeflag, header.Name)
 		}
 	}
 	return nil

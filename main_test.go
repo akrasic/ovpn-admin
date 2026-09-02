@@ -1,6 +1,9 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // Helper function to create a test OvpnAdmin instance
@@ -1989,7 +1994,7 @@ func TestUserDelete_RefusesActiveCertificate(t *testing.T) {
 		t.Fatalf("writing index.txt: %v", err)
 	}
 
-	err, msg := oAdmin.userDelete("activeuser")
+	msg, err := oAdmin.userDelete("activeuser")
 	if err == nil {
 		t.Fatal("Deleting an active user must be refused: the entry is only renamed, so the certificate would stay valid and never enter the CRL")
 	}
@@ -2027,7 +2032,7 @@ func TestUserDelete_UnknownUserStillNotFound(t *testing.T) {
 		t.Fatalf("writing index.txt: %v", err)
 	}
 
-	err, _ := oAdmin.userDelete("ghost")
+	_, err := oAdmin.userDelete("ghost")
 	var missing notFoundError
 	if !errors.As(err, &missing) {
 		t.Errorf("Expected notFoundError for an unknown user, got %T (%v)", err, err)
@@ -2580,7 +2585,7 @@ func TestUserDelete_ExpiredUserFreesTheUsername(t *testing.T) {
 		writePkiFile(t, filepath.Join(dir, f), "x")
 	}
 
-	if err, msg := oAdmin.userDelete("olduser"); err != nil {
+	if msg, err := oAdmin.userDelete("olduser"); err != nil {
 		t.Fatalf("deleting an expired user should succeed, got %v (%s)", err, msg)
 	}
 	if fExist(filepath.Join(dir, "pki/reqs/olduser.req")) {
@@ -2639,7 +2644,7 @@ func TestUserRotate_ReplacesCertificateDespiteExistingFiles(t *testing.T) {
 		writePkiFile(t, filepath.Join(dir, f), "old")
 	}
 
-	if err, msg := oAdmin.userRotate("vpnuser", ""); err != nil {
+	if msg, err := oAdmin.userRotate("vpnuser", ""); err != nil {
 		t.Fatalf("rotate failed: %v (%s)", err, msg)
 	}
 
@@ -2669,7 +2674,7 @@ func TestUserRotate_RestoresOldFilesWhenCreateFails(t *testing.T) {
 		writePkiFile(t, filepath.Join(dir, f), "old")
 	}
 
-	err, _ := oAdmin.userRotate("failuser", "")
+	_, err := oAdmin.userRotate("failuser", "")
 	if err == nil {
 		t.Fatal("rotate should fail when the replacement certificate cannot be issued")
 	}
@@ -3049,5 +3054,264 @@ func TestRenderUserRows_RefreshesConnectionData(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "Online") {
 		t.Error("row still shows the Online badge from the stale connection cache")
+	}
+}
+
+// =============================================================================
+// Audit regression tests (2026-09-02): unrevoke restore, slave sync hardening,
+// sync-time race, server-cert gauge, config panics, mgmt startup sweep.
+// =============================================================================
+
+func TestUserUnrevoke_RestoresBothCertificateCopies(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	dir := setupPkiTestDirs(t)
+
+	writePkiFile(t, *indexTxtPath, "R\t400101000000Z\t250101000000Z\t07\tunknown\t/CN=user1\n")
+	writePkiFile(t, filepath.Join(dir, "pki/revoked/certs_by_serial/07.crt"), "crt")
+	writePkiFile(t, filepath.Join(dir, "pki/revoked/private_by_serial/07.key"), "key")
+	writePkiFile(t, filepath.Join(dir, "pki/revoked/reqs_by_serial/07.req"), "req")
+	for _, d := range []string{"pki/issued", "pki/certs_by_serial", "pki/private", "pki/reqs"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	if msg, err := oAdmin.userUnrevoke("user1"); err != nil {
+		t.Fatalf("unrevoke failed: %v (%s)", err, msg)
+	}
+
+	// revoke leaves one archived certificate; the restore has to put it back in
+	// both places easyrsa keeps it. Moving it twice restored only the first.
+	for path, want := range map[string]string{
+		"pki/issued/user1.crt":       "crt",
+		"pki/certs_by_serial/07.pem": "crt",
+		"pki/private/user1.key":      "key",
+		"pki/reqs/user1.req":         "req",
+	} {
+		if got := fRead(filepath.Join(dir, path)); got != want {
+			t.Errorf("%s: got %q, want %q", path, got, want)
+		}
+	}
+	if fExist(filepath.Join(dir, "pki/revoked/certs_by_serial/07.crt")) {
+		t.Error("the archived certificate should be consumed by the restore")
+	}
+	if !strings.Contains(fRead(*indexTxtPath), "V\t400101000000Z\t\t07\tunknown\t/CN=user1") {
+		t.Error("the index entry should be valid again")
+	}
+}
+
+func TestFDownload_RejectsNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"status":"error"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "archive.tar.gz")
+	if err := fDownload(path, srv.URL, false); err == nil {
+		t.Fatal("a 403 must be an error, not a successful download of the error page")
+	}
+	if fExist(path) {
+		t.Error("no file should be written for an error response")
+	}
+}
+
+// writeTarGz builds a small tar.gz of regular-file entries at path.
+func writeTarGz(t *testing.T, path string, entries map[string]string) {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for name, content := range entries {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("tar header %s: %v", name, err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("tar write %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestExtractFromArchive_UnpacksRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "ok.tar.gz")
+	writeTarGz(t, archive, map[string]string{"sub/file.txt": "hello"})
+
+	target := filepath.Join(dir, "out")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractFromArchive(archive, target); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if got := fRead(filepath.Join(target, "sub", "file.txt")); got != "hello" {
+		t.Errorf("extracted file holds %q, want %q", got, "hello")
+	}
+}
+
+func TestExtractFromArchive_RejectsEscapingEntryNames(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "evil.tar.gz")
+	writeTarGz(t, archive, map[string]string{"../escaped.txt": "boom"})
+
+	target := filepath.Join(dir, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractFromArchive(archive, target); err == nil {
+		t.Fatal("an entry addressing outside the target directory must be rejected")
+	}
+	if fExist(filepath.Join(dir, "escaped.txt")) {
+		t.Error("the escaping entry must not be written")
+	}
+}
+
+func TestExtractFromArchive_CorruptArchiveIsAnErrorNotFatal(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "bad.tar.gz")
+	// What a slave used to write to disk after downloading an error page.
+	if err := os.WriteFile(archive, []byte(`{"status":"error"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractFromArchive(archive, dir); err == nil {
+		t.Fatal("a non-gzip file must produce an error")
+	}
+}
+
+func TestSyncTimesAccessors_ConcurrentUse(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				oAdmin.markSyncAttempt("2026-01-01 00:00:00", j%2 == 0)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_, _ = oAdmin.getSyncTimes()
+			}
+		}()
+	}
+	wg.Wait()
+
+	lastTry, lastSuccessful := oAdmin.getSyncTimes()
+	if lastTry == "" || lastSuccessful == "" {
+		t.Error("sync times should be recorded")
+	}
+}
+
+func TestUsersList_ServerCertExpireIgnoresRevokedLeftovers(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	setupPkiTestDirs(t)
+
+	// The REVOKED-* rename a delete leaves behind falls into the same branch as
+	// the server certificate; it must not overwrite the server-expiry gauge.
+	writePkiFile(t, *indexTxtPath,
+		"V\t400101000000Z\t\t01\tunknown\t/CN=server\n"+
+			"V\t500101000000Z\t\t02\tunknown\t/CN=REVOKED-gone-cafe0123\n")
+
+	oAdmin.usersList()
+
+	want := float64((parseDateToUnix(indexTxtDateLayout, "400101000000Z") - time.Now().Unix()) / 3600 / 24)
+	if got := testutil.ToFloat64(ovpnServerCertExpire); got != want {
+		t.Errorf("server cert expiry gauge is %v, want %v (the server line, not the leftover)", got, want)
+	}
+}
+
+func TestRenderClientConfig_SkipsMalformedServerValue(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	setupPkiTestDirs(t)
+	writePkiFile(t, *indexTxtPath, "V\t400101000000Z\t\t01\tunknown\t/CN=u1\n")
+
+	orig := *openvpnServer
+	*openvpnServer = []string{"hostonly", "1.2.3.4:1194:udp"}
+	t.Cleanup(func() { *openvpnServer = orig })
+
+	conf := oAdmin.renderClientConfig("u1") // must not panic on the malformed value
+	if !strings.Contains(conf, "1.2.3.4") {
+		t.Error("the well-formed server value should still be rendered")
+	}
+}
+
+func TestGetOvpnCaCertExpireDate_ToleratesMissingOrGarbledCaCert(t *testing.T) {
+	dir := setupPkiTestDirs(t)
+
+	_ = getOvpnCaCertExpireDate() // no ca.crt at all: must not panic
+
+	writePkiFile(t, filepath.Join(dir, "pki", "ca.crt"), "not a pem certificate")
+	_ = getOvpnCaCertExpireDate() // garbled ca.crt: must not panic
+}
+
+func TestMgmtSetTimeFormat_SkipsUnreachableServerAndKeepsGoing(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	origRetries, origSleep := mgmtConnectRetries, mgmtConnectRetrySleep
+	mgmtConnectRetries, mgmtConnectRetrySleep = 1, 0
+	t.Cleanup(func() { mgmtConnectRetries, mgmtConnectRetrySleep = origRetries, origSleep })
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = c.Write([]byte("INFO: OpenVPN Management Interface, type 'help' for more info\r\n"))
+				buf := make([]byte, 256)
+				_, _ = c.Read(buf) // the "version" request
+				_, _ = c.Write([]byte("OpenVPN Version: OpenVPN 2.4.9 x86_64-pc-linux-gnu\r\nManagement Version: 1\r\nEND\r\n"))
+			}(conn)
+		}
+	}()
+
+	// One reachable 2.4 server, one dead address. The old `break` on a dial
+	// failure abandoned version detection for a random subset of the map, so
+	// the 2.4 time format was only picked up on lucky iteration orders.
+	oAdmin.mgmtInterfaces = map[string]string{
+		"down": "127.0.0.1:1",
+		"up":   listener.Addr().String(),
+	}
+
+	for i := 0; i < 20; i++ {
+		oAdmin.mgmtStatusTimeFormat = ""
+		oAdmin.mgmtSetTimeFormat()
+		if oAdmin.mgmtStatusTimeFormat != time.ANSIC {
+			t.Fatalf("round %d: the reachable 2.4 server's version was not read (format %q); "+
+				"a dead peer must not abort the sweep", i, oAdmin.mgmtStatusTimeFormat)
+		}
+	}
+}
+
+func TestBasePage_VersionsStaticAssets(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	oAdmin.dashboardPageHandler(w, req)
+
+	// The stylesheet is served with a 30-day Cache-Control header, so a deploy
+	// only reaches returning browsers if the URL changes with the build.
+	if !strings.Contains(w.Body.String(), "/static/style.css?v="+version) {
+		t.Error("the stylesheet link should carry the build version for cache busting")
 	}
 }
