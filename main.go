@@ -266,6 +266,13 @@ type OpenvpnClient struct {
 	// failed since it. Render-only, never synced.
 	LastLogin    string `json:"-"`
 	FailedLogins int    `json:"-"`
+	// CreationDate is the certificate's NotBefore, read from the certificate
+	// file - the index records no issue time. Render-only, never synced.
+	CreationDate string `json:"-"`
+	// createdUnix and expirationUnix order the sortable columns without
+	// reparsing their date strings per comparison.
+	createdUnix    int64
+	expirationUnix int64
 
 	Identity         string `json:"Identity"`
 	AccountStatus    string `json:"AccountStatus"`
@@ -526,26 +533,68 @@ func highlightIdentity(identity string, positions []int) template.HTML {
 	return template.HTML(b.String())
 }
 
-// visibleUsers applies the two filters the toolbar exposes - the hideRevoked cookie and
-// the search box - to the client list. The search is fuzzy: characters must appear in
-// order but not adjacent, results come back best match first with the matched characters
-// marked for highlighting. Both the plain list request and the re-render that follows a
-// mutation go through here, so an action taken while a filter is active does not reset
-// the table to every user.
-func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
-	users := oAdmin.getClients()
-
-	hideRevoked := false
-	if cookie, err := r.Cookie("hideRevoked"); err == nil {
-		hideRevoked = cookie.Value == "true"
+// paramOrCookie reads one view setting: an explicit query/form parameter wins,
+// otherwise the cookie the toolbar persists the setting in. Cookies travel on
+// every request, so mutation re-renders keep the current view without the
+// templates having to thread state through hx-include.
+func paramOrCookie(r *http.Request, param, cookieName string) string {
+	if v := r.FormValue(param); v != "" {
+		return v
 	}
+	if cookie, err := r.Cookie(cookieName); err == nil {
+		return cookie.Value
+	}
+	return ""
+}
 
-	// The toggle is labelled "Hide Revoked", so only revoked users are hidden. Expired
-	// ones stay listed: they are the entries an operator still has to rotate or delete.
-	if hideRevoked {
+// sortUsers orders users by key ("name", "created", "expires", "status"),
+// username A-Z as the tie-break and for any unknown key.
+func sortUsers(users []OpenvpnClient, key string, desc bool) {
+	less := func(a, b OpenvpnClient) bool {
+		switch key {
+		case "created":
+			if a.createdUnix != b.createdUnix {
+				return a.createdUnix < b.createdUnix
+			}
+		case "expires":
+			if a.expirationUnix != b.expirationUnix {
+				return a.expirationUnix < b.expirationUnix
+			}
+		case "status":
+			if a.AccountStatus != b.AccountStatus {
+				return a.AccountStatus < b.AccountStatus
+			}
+		}
+		return strings.ToLower(a.Identity) < strings.ToLower(b.Identity)
+	}
+	sort.SliceStable(users, func(i, j int) bool {
+		if desc {
+			return less(users[j], users[i])
+		}
+		return less(users[i], users[j])
+	})
+}
+
+// visibleUsers applies the toolbar's view state - the status filter, the search box
+// and the column sort - to the client list. The search is fuzzy: characters must
+// appear in order but not adjacent, results come back best match first with the
+// matched characters marked for highlighting; an explicit column sort overrides
+// that ranking. Both the plain list request and the re-render that follows a
+// mutation go through here, so an action taken while a filter is active does not
+// reset the table to every user.
+func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
+	// A copy: the shared slice is handed out by reference under RLock and must
+	// never be reordered in place.
+	shared := oAdmin.getClients()
+	users := make([]OpenvpnClient, len(shared))
+	copy(users, shared)
+
+	// The status filter narrows the table to one account state; "all" (or no
+	// setting) shows everyone.
+	if status := paramOrCookie(r, "status", "statusFilter"); status != "" && status != "all" {
 		filtered := make([]OpenvpnClient, 0, len(users))
 		for _, user := range users {
-			if user.AccountStatus != "Revoked" {
+			if strings.EqualFold(user.AccountStatus, status) {
 				filtered = append(filtered, user)
 			}
 		}
@@ -554,7 +603,8 @@ func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
 
 	// FormValue covers the query string on a GET and the posted body on a mutation, which
 	// is how hx-include delivers the term back to us.
-	if search := r.FormValue("search"); search != "" {
+	search := r.FormValue("search")
+	if search != "" {
 		type match struct {
 			user  OpenvpnClient
 			score int
@@ -574,17 +624,52 @@ func (oAdmin *OvpnAdmin) visibleUsers(r *http.Request) []OpenvpnClient {
 		}
 	}
 
+	// An explicit column sort orders whatever survived the filters. Without one,
+	// an active search keeps its relevance ranking and everything else defaults
+	// to username A-Z.
+	sortKey := paramOrCookie(r, "sort", "sortKey")
+	if search != "" && sortKey == "" {
+		return users
+	}
+	sortUsers(users, sortKey, paramOrCookie(r, "dir", "sortDir") == "desc")
 	return users
 }
 
 // filtersActive reports whether the row list was narrowed by the toolbar, so the empty
-// state can tell "nothing matches your filter" apart from "there are no users".
+// state can tell "nothing matches your filter" apart from "there are no users". Sorting
+// never hides a row, so it does not count.
 func (oAdmin *OvpnAdmin) filtersActive(r *http.Request) bool {
 	if r.FormValue("search") != "" {
 		return true
 	}
-	cookie, err := r.Cookie("hideRevoked")
-	return err == nil && cookie.Value == "true"
+	status := paramOrCookie(r, "status", "statusFilter")
+	return status != "" && status != "all"
+}
+
+// certCreationTime reads the issue time of identity's certificate: the index has
+// no issue column, but the certificate itself records NotBefore. A revoked or
+// archived certificate's file was moved aside under its serial.
+func certCreationTime(identity, serial string) (time.Time, bool) {
+	candidates := []string{
+		*easyrsaDirPath + "/pki/issued/" + identity + ".crt",
+		*easyrsaDirPath + "/pki/revoked/certs_by_serial/" + serial + ".crt",
+		*easyrsaDirPath + "/pki/certs_by_serial/" + serial + ".pem",
+	}
+	for _, path := range candidates {
+		if !fExist(path) {
+			continue
+		}
+		block, _ := pem.Decode([]byte(fRead(path)))
+		if block == nil {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		return cert.NotBefore, true
+	}
+	return time.Time{}, false
 }
 
 // userAccountStatus reports the status the UI shows for username - "Active", "Revoked" or
@@ -808,22 +893,34 @@ func humanBytes(s string) string {
 func (oAdmin *OvpnAdmin) indexPageHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
 
-	hideRevoked := false
-	if cookie, err := r.Cookie("hideRevoked"); err == nil {
-		hideRevoked = cookie.Value == "true"
+	// The toolbar's persisted view state, so the initial render marks the right
+	// segment and sort column before any JS runs.
+	statusFilter := paramOrCookie(r, "status", "statusFilter")
+	if statusFilter == "" {
+		statusFilter = "all"
+	}
+	sortKey := paramOrCookie(r, "sort", "sortKey")
+	if sortKey == "" {
+		sortKey = "name"
+	}
+	sortDir := paramOrCookie(r, "dir", "sortDir")
+	if sortDir != "desc" {
+		sortDir = "asc"
 	}
 	_, lastSuccessfulSync := oAdmin.getSyncTimes()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "base", map[string]interface{}{
-		"Page":        "users",
-		"Users":       oAdmin.getClients(),
-		"ServerRole":  oAdmin.role,
-		"Modules":     oAdmin.modules,
-		"HideRevoked": hideRevoked,
-		"LastSync":    lastSuccessfulSync,
-		"Stats":       oAdmin.calculateStats(),
-		"Version":     version,
+		"Page":         "users",
+		"Users":        oAdmin.getClients(),
+		"ServerRole":   oAdmin.role,
+		"Modules":      oAdmin.modules,
+		"StatusFilter": statusFilter,
+		"SortKey":      sortKey,
+		"SortDir":      sortDir,
+		"LastSync":     lastSuccessfulSync,
+		"Stats":        oAdmin.calculateStats(),
+		"Version":      version,
 	})
 	if err != nil {
 		log.Errorf("Error rendering index template: %v", err)
@@ -1726,6 +1823,11 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 			}
 
 			expirationUnix := parseDateToUnix(indexTxtDateLayout, line.ExpirationDate)
+			ovpnClient.expirationUnix = expirationUnix
+			if created, ok := certCreationTime(line.Identity, line.SerialNumber); ok {
+				ovpnClient.CreationDate = created.UTC().Format(stringDateFormat)
+				ovpnClient.createdUnix = created.Unix()
+			}
 			ovpnClientCertificateExpire.WithLabelValues(line.Identity).Set(float64((expirationUnix - apochNow) / 3600 / 24))
 
 			if (expirationUnix - apochNow) < 0 {

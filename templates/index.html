@@ -26,17 +26,21 @@
 
     <div class="panel-toolbar">
         <div class="toolbar-left">
-            <button type="button" class="btn btn-outline-secondary btn-sm"
-                    id="toggle-revoked-btn"
-                    aria-pressed="{{if .HideRevoked}}true{{else}}false{{end}}"
-                    hx-get="/partials/users"
-                    hx-target="#user-table-body"
-                    hx-swap="innerHTML"
-                    hx-include="[name='search']"
-                    onclick="toggleHideRevoked()">
-                <i class="bi bi-eye{{if .HideRevoked}}-slash{{end}}"></i>
-                <span class="toggle-revoked-label">{{if .HideRevoked}}Show Revoked{{else}}Hide Revoked{{end}}</span>
-            </button>
+            {{$sf := or .StatusFilter "all"}}
+            <div class="segmented" role="group" aria-label="Filter by status" id="status-filter">
+                <button type="button" class="segmented-btn{{if eq $sf "all"}} active{{end}}"
+                        data-status="all" aria-pressed="{{if eq $sf "all"}}true{{else}}false{{end}}"
+                        onclick="setStatusFilter('all')">All</button>
+                <button type="button" class="segmented-btn{{if eq $sf "active"}} active{{end}}"
+                        data-status="active" aria-pressed="{{if eq $sf "active"}}true{{else}}false{{end}}"
+                        onclick="setStatusFilter('active')">Active</button>
+                <button type="button" class="segmented-btn{{if eq $sf "revoked"}} active{{end}}"
+                        data-status="revoked" aria-pressed="{{if eq $sf "revoked"}}true{{else}}false{{end}}"
+                        onclick="setStatusFilter('revoked')">Revoked</button>
+                <button type="button" class="segmented-btn{{if eq $sf "expired"}} active{{end}}"
+                        data-status="expired" aria-pressed="{{if eq $sf "expired"}}true{{else}}false{{end}}"
+                        onclick="setStatusFilter('expired')">Expired</button>
+            </div>
             <button type="button" class="btn btn-outline-secondary btn-sm"
                     onclick="refreshUsers()"
                     title="Refresh (R)">
@@ -89,10 +93,12 @@
                             </label>
                         </th>
                         {{end}}
-                        <th scope="col">User</th>
-                        <th scope="col">Status</th>
+                        {{$sk := or .SortKey "name"}}{{$sd := or .SortDir "asc"}}
+                        {{template "sortable_th" dict "Key" "name" "Label" "User" "SortKey" $sk "SortDir" $sd}}
+                        {{template "sortable_th" dict "Key" "status" "Label" "Status" "SortKey" $sk "SortDir" $sd}}
                         <th scope="col" class="text-center">Connections</th>
-                        <th scope="col">Expires</th>
+                        {{template "sortable_th" dict "Key" "created" "Label" "Created" "SortKey" $sk "SortDir" $sd}}
+                        {{template "sortable_th" dict "Key" "expires" "Label" "Expires" "SortKey" $sk "SortDir" $sd}}
                         <th scope="col">Revoked</th>
                         <th scope="col" class="text-end">Actions</th>
                     </tr>
@@ -132,4 +138,15 @@
     </button>
 </div>
 {{end}}
+{{end}}
+
+{{/* A column header that sorts the table. aria-sort and the icon reflect the
+     current sort; setSort() keeps them in step after the initial render. */}}
+{{define "sortable_th"}}
+<th scope="col" aria-sort="{{if eq .SortKey .Key}}{{if eq .SortDir "desc"}}descending{{else}}ascending{{end}}{{else}}none{{end}}">
+    <button type="button" class="th-sort" data-sort-key="{{.Key}}" onclick="setSort('{{.Key}}')" title="Sort by {{.Label}}">
+        {{.Label}}
+        <i class="bi {{if eq .SortKey .Key}}{{if eq .SortDir "desc"}}bi-sort-down{{else}}bi-sort-up{{end}}{{else}}bi-arrow-down-up{{end}} sort-icon" aria-hidden="true"></i>
+    </button>
+</th>
 {{end}}

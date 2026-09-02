@@ -294,23 +294,45 @@
         }
 
         // =====================================================================
-        // Toggle revoked filter
+        // Status filter + column sort
+        //
+        // Both live in cookies the server reads on every render - list requests
+        // and mutation re-renders alike - so nothing has to thread them through
+        // hx-include. This JS only keeps the controls' visual state in step and
+        // asks the table to re-fetch.
         // =====================================================================
-        function setHideRevoked(hidden) {
-            setCookie('hideRevoked', hidden);
-            // The button is server-rendered and only the tbody gets swapped, so its own
-            // label has to be updated here or it stays stale until a full page load.
-            const button = document.getElementById('toggle-revoked-btn');
-            if (!button) return;
-            button.setAttribute('aria-pressed', String(hidden));
-            button.querySelector('.toggle-revoked-label').textContent =
-                hidden ? 'Show Revoked' : 'Hide Revoked';
-            button.querySelector('i').className = hidden ? 'bi bi-eye-slash' : 'bi bi-eye';
+        function refreshUserTable() {
+            const tbody = document.getElementById('user-table-body');
+            if (tbody) htmx.trigger(tbody, 'refresh');
         }
 
-        function toggleHideRevoked() {
-            setHideRevoked(getCookie('hideRevoked') !== 'true');
-            return true;
+        function setStatusFilter(status) {
+            setCookie('statusFilter', status);
+            // The control is server-rendered and only the tbody gets swapped, so its
+            // pressed state has to be updated here or it goes stale until a page load.
+            document.querySelectorAll('#status-filter .segmented-btn').forEach(btn => {
+                const active = btn.dataset.status === status;
+                btn.classList.toggle('active', active);
+                btn.setAttribute('aria-pressed', String(active));
+            });
+            refreshUserTable();
+        }
+
+        const SORT_ICONS = { none: 'bi-arrow-down-up', asc: 'bi-sort-up', desc: 'bi-sort-down' };
+
+        function setSort(key) {
+            // Clicking the current column flips the direction; a new column starts A-Z.
+            const current = getCookie('sortKey') || 'name';
+            const dir = (current === key && (getCookie('sortDir') || 'asc') === 'asc') ? 'desc' : 'asc';
+            setCookie('sortKey', key);
+            setCookie('sortDir', dir);
+            document.querySelectorAll('#user-table th[aria-sort]').forEach(th => {
+                const button = th.querySelector('.th-sort');
+                const state = button.dataset.sortKey === key ? dir : 'none';
+                th.setAttribute('aria-sort', state === 'none' ? 'none' : state + 'ending');
+                button.querySelector('.sort-icon').className = 'bi ' + SORT_ICONS[state] + ' sort-icon';
+            });
+            refreshUserTable();
         }
 
         // Offered by the empty state when a filter, not an absence of users, is the
@@ -318,8 +340,7 @@
         function clearFilters() {
             const search = document.querySelector('.search-input');
             if (search) search.value = '';
-            setHideRevoked(false);
-            htmx.ajax('GET', '/partials/users', { target: '#user-table-body', swap: 'innerHTML' });
+            setStatusFilter('all');
         }
 
         // =====================================================================

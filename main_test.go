@@ -4,10 +4,17 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"html/template"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -260,20 +267,23 @@ func TestIndexPageHandler_SlaveRole(t *testing.T) {
 	}
 }
 
-func TestIndexPageHandler_HideRevokedCookie(t *testing.T) {
+func TestIndexPageHandler_StatusFilterCookie(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "true"})
+	req.AddCookie(&http.Cookie{Name: "statusFilter", Value: "revoked"})
 	w := httptest.NewRecorder()
 
 	oAdmin.indexPageHandler(w, req)
 
 	body := w.Body.String()
 
-	// When hideRevoked is true, button should say "Show Revoked"
-	if !strings.Contains(body, "Show Revoked") {
-		t.Error("When hideRevoked=true, button should say 'Show Revoked'")
+	// The persisted filter marks its segment pressed on the initial render.
+	if !strings.Contains(body, `data-status="revoked" aria-pressed="true"`) {
+		t.Error("the Revoked segment should render pressed when the cookie holds it")
+	}
+	if strings.Contains(body, `data-status="all" aria-pressed="true"`) {
+		t.Error("only the persisted segment should render pressed")
 	}
 }
 
@@ -1001,7 +1011,7 @@ func TestUserListHandler(t *testing.T) {
 	}
 }
 
-func TestUserListHandler_HideRevoked(t *testing.T) {
+func TestUserListHandler_StatusFilter(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 	oAdmin.clients = []OpenvpnClient{
 		{Identity: "activeuser", AccountStatus: "Active", Connections: 1, ExpirationDate: "2099-12-31 23:59:59"},
@@ -1009,7 +1019,7 @@ func TestUserListHandler_HideRevoked(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/users", nil)
-	req.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "true"})
+	req.AddCookie(&http.Cookie{Name: "statusFilter", Value: "active"})
 	w := httptest.NewRecorder()
 
 	oAdmin.userListHandler(w, req)
@@ -1020,7 +1030,7 @@ func TestUserListHandler_HideRevoked(t *testing.T) {
 		t.Error("User list should contain activeuser")
 	}
 	if strings.Contains(body, "revokeduser") {
-		t.Error("User list should NOT contain revokeduser when hideRevoked=true")
+		t.Error("User list should NOT contain revokeduser when the filter is Active")
 	}
 }
 
@@ -1814,7 +1824,7 @@ func TestBulkActionsBar_DeleteHiddenForSlave(t *testing.T) {
 // visibleUsers Tests
 // =============================================================================
 
-func TestVisibleUsers_HideRevokedKeepsExpired(t *testing.T) {
+func TestVisibleUsers_StatusFilterNarrowsToOneState(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 	oAdmin.clients = []OpenvpnClient{
 		{Identity: "activeuser", AccountStatus: "Active"},
@@ -1822,25 +1832,34 @@ func TestVisibleUsers_HideRevokedKeepsExpired(t *testing.T) {
 		{Identity: "expireduser", AccountStatus: "Expired"},
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/users", nil)
-	req.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "true"})
-
-	var got []string
-	for _, user := range oAdmin.visibleUsers(req) {
-		got = append(got, user.Identity)
+	cases := []struct {
+		filter string
+		want   []string
+	}{
+		{"all", []string{"activeuser", "expireduser", "revokeduser"}},
+		{"active", []string{"activeuser"}},
+		{"revoked", []string{"revokeduser"}},
+		{"expired", []string{"expireduser"}},
 	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/users", nil)
+		req.AddCookie(&http.Cookie{Name: "statusFilter", Value: tc.filter})
 
-	// The toggle is labelled "Hide Revoked": an expired user still needs rotating or
-	// deleting, so hiding it leaves the operator no way to act on it.
-	want := []string{"activeuser", "expireduser"}
-	if len(got) != len(want) {
-		t.Fatalf("Expected %v, got %v", want, got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Expected %v, got %v", want, got)
-			break
+		var got []string
+		for _, user := range oAdmin.visibleUsers(req) {
+			got = append(got, user.Identity)
 		}
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("filter %q: expected %v, got %v", tc.filter, tc.want, got)
+		}
+	}
+
+	// An explicit parameter wins over the persisted cookie.
+	req := httptest.NewRequest(http.MethodGet, "/users?status=revoked", nil)
+	req.AddCookie(&http.Cookie{Name: "statusFilter", Value: "active"})
+	users := oAdmin.visibleUsers(req)
+	if len(users) != 1 || users[0].Identity != "revokeduser" {
+		t.Errorf("the status parameter should override the cookie, got %v", users)
 	}
 }
 
@@ -2880,16 +2899,23 @@ func TestFiltersActive(t *testing.T) {
 		t.Error("a search term counts as an active filter")
 	}
 
-	hidden := httptest.NewRequest(http.MethodGet, "/users", nil)
-	hidden.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "true"})
-	if !oAdmin.filtersActive(hidden) {
-		t.Error("hideRevoked counts as an active filter")
+	narrowed := httptest.NewRequest(http.MethodGet, "/users", nil)
+	narrowed.AddCookie(&http.Cookie{Name: "statusFilter", Value: "revoked"})
+	if !oAdmin.filtersActive(narrowed) {
+		t.Error("a status filter counts as an active filter")
 	}
 
-	shown := httptest.NewRequest(http.MethodGet, "/users", nil)
-	shown.AddCookie(&http.Cookie{Name: "hideRevoked", Value: "false"})
-	if oAdmin.filtersActive(shown) {
-		t.Error("hideRevoked=false is not an active filter")
+	everyone := httptest.NewRequest(http.MethodGet, "/users", nil)
+	everyone.AddCookie(&http.Cookie{Name: "statusFilter", Value: "all"})
+	if oAdmin.filtersActive(everyone) {
+		t.Error("statusFilter=all is not an active filter")
+	}
+
+	// Sorting reorders rows but hides none, so it must not flip the empty state
+	// into claiming a filter is the reason the table is empty.
+	sorted := httptest.NewRequest(http.MethodGet, "/users?sort=created&dir=desc", nil)
+	if oAdmin.filtersActive(sorted) {
+		t.Error("a sort is not a filter")
 	}
 }
 
@@ -3313,5 +3339,194 @@ func TestBasePage_VersionsStaticAssets(t *testing.T) {
 	// only reaches returning browsers if the URL changes with the build.
 	if !strings.Contains(w.Body.String(), "/static/style.css?v="+version) {
 		t.Error("the stylesheet link should carry the build version for cache busting")
+	}
+}
+
+// =============================================================================
+// Users page: status filter, column sort, creation date
+// =============================================================================
+
+// writeTestCert writes a self-signed certificate with the given NotBefore to
+// path, standing in for what easyrsa issues.
+func writeTestCert(t *testing.T, path string, notBefore time.Time) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    notBefore,
+		NotAfter:     notBefore.AddDate(10, 0, 0),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tpl, &tpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		t.Fatalf("encode certificate: %v", err)
+	}
+	writePkiFile(t, path, buf.String())
+}
+
+func TestUsersList_CreationDateFromCertificate(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	dir := setupPkiTestDirs(t)
+
+	writeTestCert(t, filepath.Join(dir, "pki/issued/alice.crt"), time.Date(2026, 3, 14, 9, 26, 53, 0, time.UTC))
+	// bob's per-name file was moved aside by revoke; only the by-serial archive
+	// still knows when his certificate was issued.
+	writeTestCert(t, filepath.Join(dir, "pki/revoked/certs_by_serial/0B.crt"), time.Date(2025, 7, 1, 12, 0, 0, 0, time.UTC))
+
+	writePkiFile(t, *indexTxtPath,
+		"V\t400101000000Z\t\t0A\tunknown\t/CN=alice\n"+
+			"R\t400101000000Z\t250801000000Z\t0B\tunknown\t/CN=bob\n")
+
+	byName := map[string]OpenvpnClient{}
+	for _, u := range oAdmin.usersList() {
+		byName[u.Identity] = u
+	}
+
+	if got := byName["alice"].CreationDate; got != "2026-03-14 09:26:53" {
+		t.Errorf("alice creation date %q, want the certificate's NotBefore", got)
+	}
+	if got := byName["bob"].CreationDate; got != "2025-07-01 12:00:00" {
+		t.Errorf("bob creation date %q, want it read from the revoked by-serial archive", got)
+	}
+}
+
+func TestVisibleUsers_DefaultSortIsUsernameAZ(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	// Index order is issue order, which means nothing to an operator.
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "charlie", AccountStatus: "Active"},
+		{Identity: "alice", AccountStatus: "Active"},
+		{Identity: "Bravo", AccountStatus: "Active"},
+	}
+
+	var got []string
+	for _, u := range oAdmin.visibleUsers(httptest.NewRequest(http.MethodGet, "/users", nil)) {
+		got = append(got, u.Identity)
+	}
+	if strings.Join(got, ",") != "alice,Bravo,charlie" {
+		t.Errorf("default order should be username A-Z case-insensitively, got %v", got)
+	}
+}
+
+func TestVisibleUsers_SortByColumnAndDirection(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "old", AccountStatus: "Revoked", createdUnix: 100, expirationUnix: 300},
+		{Identity: "new", AccountStatus: "Active", createdUnix: 300, expirationUnix: 100},
+		{Identity: "mid", AccountStatus: "Expired", createdUnix: 200, expirationUnix: 200},
+	}
+
+	cases := []struct {
+		query string
+		want  string
+	}{
+		{"sort=created", "old,mid,new"},
+		{"sort=created&dir=desc", "new,mid,old"},
+		{"sort=expires", "new,mid,old"},
+		{"sort=status", "new,mid,old"}, // Active < Expired < Revoked
+		{"sort=name&dir=desc", "old,new,mid"},
+	}
+	for _, tc := range cases {
+		var got []string
+		for _, u := range oAdmin.visibleUsers(httptest.NewRequest(http.MethodGet, "/users?"+tc.query, nil)) {
+			got = append(got, u.Identity)
+		}
+		if strings.Join(got, ",") != tc.want {
+			t.Errorf("%s: expected %s, got %v", tc.query, tc.want, got)
+		}
+	}
+
+	// The toolbar persists the sort in cookies; a request without parameters
+	// (a mutation re-render) must honour them.
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	req.AddCookie(&http.Cookie{Name: "sortKey", Value: "created"})
+	req.AddCookie(&http.Cookie{Name: "sortDir", Value: "desc"})
+	var got []string
+	for _, u := range oAdmin.visibleUsers(req) {
+		got = append(got, u.Identity)
+	}
+	if strings.Join(got, ",") != "new,mid,old" {
+		t.Errorf("cookie sort: expected new,mid,old, got %v", got)
+	}
+}
+
+func TestVisibleUsers_SearchKeepsRelevanceUnlessSorted(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "az", AccountStatus: "Active"},
+		{Identity: "za", AccountStatus: "Active"},
+	}
+
+	// "z" prefixes "za", so relevance puts it first even though "az" sorts first.
+	var ranked []string
+	for _, u := range oAdmin.visibleUsers(httptest.NewRequest(http.MethodGet, "/users?search=z", nil)) {
+		ranked = append(ranked, u.Identity)
+	}
+	if strings.Join(ranked, ",") != "za,az" {
+		t.Errorf("a search without an explicit sort keeps relevance order, got %v", ranked)
+	}
+
+	var sorted []string
+	for _, u := range oAdmin.visibleUsers(httptest.NewRequest(http.MethodGet, "/users?search=z&sort=name", nil)) {
+		sorted = append(sorted, u.Identity)
+	}
+	if strings.Join(sorted, ",") != "az,za" {
+		t.Errorf("an explicit sort overrides the search ranking, got %v", sorted)
+	}
+}
+
+func TestVisibleUsers_DoesNotReorderTheSharedSlice(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "charlie", AccountStatus: "Active"},
+		{Identity: "alice", AccountStatus: "Active"},
+	}
+
+	oAdmin.visibleUsers(httptest.NewRequest(http.MethodGet, "/users", nil))
+
+	// The slice handed out under RLock is shared state: sorting must work on a
+	// copy, never reorder it in place under a concurrent reader.
+	if got := oAdmin.getClients()[0].Identity; got != "charlie" {
+		t.Errorf("visibleUsers reordered the shared client slice (first is now %q)", got)
+	}
+}
+
+func TestUsersPage_StatusFilterAndSortableHeaders(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	w := httptest.NewRecorder()
+	oAdmin.indexPageHandler(w, req)
+	body := w.Body.String()
+
+	if !strings.Contains(body, `id="status-filter"`) {
+		t.Error("the toolbar should carry the status filter control")
+	}
+	for _, status := range []string{"all", "active", "revoked", "expired"} {
+		if !strings.Contains(body, `data-status="`+status+`"`) {
+			t.Errorf("the status filter should offer %q", status)
+		}
+	}
+	for _, key := range []string{"name", "status", "created", "expires"} {
+		if !strings.Contains(body, `data-sort-key="`+key+`"`) {
+			t.Errorf("the %q column should be sortable", key)
+		}
+	}
+	if !strings.Contains(body, "Created") {
+		t.Error("the table should show the Created column")
+	}
+	// Default view: sorted by username ascending, announced via aria-sort.
+	if !strings.Contains(body, `aria-sort="ascending"`) {
+		t.Error("the default sort column should announce aria-sort=ascending")
+	}
+	if strings.Contains(body, "Hide Revoked") {
+		t.Error("the Hide Revoked toggle is replaced by the status filter")
 	}
 }

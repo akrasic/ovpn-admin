@@ -45,6 +45,13 @@
         {{end}}
     </td>
     <td>
+        {{if $user.CreationDate}}
+        <span class="text-muted" title="Certificate issued (UTC)">{{$user.CreationDate}}</span>
+        {{else}}
+        <span class="text-muted">-</span>
+        {{end}}
+    </td>
+    <td>
         {{if $user.ExpirationDate}}
         <span class="{{if $user.ExpiringSoon}}text-warning fw-semibold{{else}}text-muted{{end}}">
             {{$user.ExpirationDate}}
@@ -71,12 +78,12 @@
 </tr>
 {{else}}
 <tr>
-    <td colspan="{{if eq $.ServerRole "master"}}7{{else}}6{{end}}" class="text-center py-5">
+    <td colspan="{{if eq $.ServerRole "master"}}8{{else}}7{{end}}" class="text-center py-5">
         <div class="empty-state-inline">
             {{if $.Filtered}}
             <i class="bi bi-funnel"></i>
             <h5>No matching users</h5>
-            <p>No user matches the current search or the Hide Revoked filter.</p>
+            <p>No user matches the current search or status filter.</p>
             <button type="button" class="btn btn-outline-secondary btn-sm" onclick="clearFilters()">
                 <i class="bi bi-x-lg"></i>
                 Clear filters
