@@ -812,9 +812,29 @@ func (oAdmin *OvpnAdmin) modalCreateHandler(w http.ResponseWriter, r *http.Reque
 
 func (oAdmin *OvpnAdmin) modalActivityHandler(w http.ResponseWriter, r *http.Request) {
 	log.Info(r.RemoteAddr, " ", r.RequestURI)
+
+	// ?user=<name> narrows the view to one account's history. An attempt belongs
+	// to a user if they typed the name OR their certificate was used - the
+	// latter is how a cn-mismatch probe against their account shows up.
+	filterUser := r.FormValue("user")
+	attempts := parseAuthLog(*authLogPath, authLogParseLimit)
+	if filterUser != "" {
+		filtered := make([]authAttempt, 0, len(attempts))
+		for _, a := range attempts {
+			if a.Username == filterUser || a.CommonName == filterUser {
+				filtered = append(filtered, a)
+			}
+		}
+		attempts = filtered
+	}
+	if len(attempts) > 100 {
+		attempts = attempts[:100]
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "modal_activity", map[string]interface{}{
-		"Attempts": parseAuthLog(*authLogPath, 100),
+		"Attempts":   attempts,
+		"FilterUser": filterUser,
 	})
 	if err != nil {
 		log.Errorf("Error rendering modal_activity template: %v", err)

@@ -2291,6 +2291,70 @@ func TestModalActivityHandler_RendersAttempts(t *testing.T) {
 	}
 }
 
+func TestModalActivityHandler_FiltersToOneUser(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	writeAuthLog(t,
+		"2026-09-01T10:00:00Z\tsuccess\talice\talice\t10.1.2.3:1\n"+
+			"2026-09-01T11:00:00Z\tsuccess\tbob\tbob\t10.1.2.4:2\n"+
+			// eve typed her own name but presented alice's certificate: this
+			// belongs to alice's history, not just eve's.
+			"2026-09-01T12:00:00Z\tcn-mismatch\teve\talice\t9.9.9.9:3\n")
+
+	req := httptest.NewRequest(http.MethodGet, "/modal/activity?user=alice", nil)
+	w := httptest.NewRecorder()
+	oAdmin.modalActivityHandler(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "Login History") || !strings.Contains(body, ">alice</span>") {
+		t.Error("a filtered modal should be titled with the username")
+	}
+	if !strings.Contains(body, "10.1.2.3:1") {
+		t.Error("alice's own successful login should be listed")
+	}
+	if !strings.Contains(body, "9.9.9.9:3") {
+		t.Error("an attempt using alice's certificate under another name belongs in her history")
+	}
+	if strings.Contains(body, "10.1.2.4:2") {
+		t.Error("bob's attempts must not appear in alice's history")
+	}
+
+	// A user with no attempts gets a scoped empty state, not an error.
+	req = httptest.NewRequest(http.MethodGet, "/modal/activity?user=carol", nil)
+	w = httptest.NewRecorder()
+	oAdmin.modalActivityHandler(w, req)
+	if !strings.Contains(w.Body.String(), "No login attempts recorded for carol") {
+		t.Error("expected the per-user empty state")
+	}
+}
+
+func TestUserActions_HistoryButtonNeedsPasswdAuth(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	render := func(modules []string, status string) string {
+		w := httptest.NewRecorder()
+		err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+			"Users":      []OpenvpnClient{{Identity: "alice", AccountStatus: status}},
+			"ServerRole": "master",
+			"Modules":    modules,
+		})
+		if err != nil {
+			t.Fatalf("rendering user_rows: %v", err)
+		}
+		return w.Body.String()
+	}
+
+	// With password auth the button appears for every status: revoked and
+	// expired accounts can still be probed.
+	for _, status := range []string{"Active", "Revoked", "Expired"} {
+		if !strings.Contains(render([]string{"core", "passwdAuth"}, status), "/modal/activity?user=alice") {
+			t.Errorf("history button should render for a %s user when passwdAuth is on", status)
+		}
+	}
+	if strings.Contains(render([]string{"core"}, "Active"), "/modal/activity") {
+		t.Error("without passwdAuth there is no attempt log, so no history button")
+	}
+}
+
 func TestUserRows_ShowFailedLoginsAndLastLogin(t *testing.T) {
 	oAdmin := newTestOvpnAdmin()
 

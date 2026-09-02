@@ -4,6 +4,16 @@
 {{$modules := .Modules}}
 
 <div class="action-buttons">
+{{if hasModule $modules "passwdAuth"}}
+    <!-- Login history - every status: revoked and expired accounts can still be probed -->
+    <button type="button" class="btn btn-sm btn-action-info"
+            hx-get="/modal/activity?user={{$user.Identity}}"
+            hx-target="#modal-container"
+            title="Login history for {{$user.Identity}}">
+        <i class="bi bi-clock-history"></i>
+        <span class="btn-text">History</span>
+    </button>
+{{end}}
 {{if eq $user.AccountStatus "Active"}}
     <!-- Download config - available for all roles -->
     <button type="button" class="btn btn-sm btn-action-info"

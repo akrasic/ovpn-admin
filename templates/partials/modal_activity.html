@@ -6,7 +6,7 @@
             <div class="modal-header">
                 <h5 class="modal-title" id="modal-title">
                     <i class="bi bi-clock-history me-2"></i>
-                    Login Activity
+                    {{if .FilterUser}}Login History<span class="modal-title-user">{{.FilterUser}}</span>{{else}}Login Activity{{end}}
                 </h5>
                 <button type="button" class="btn-close" aria-label="Close" onclick="closeModal()"></button>
             </div>
@@ -52,8 +52,13 @@
                 {{else}}
                 <div class="empty-state-inline">
                     <i class="bi bi-clock-history"></i>
+                    {{if .FilterUser}}
+                    <h5>No login attempts recorded for {{.FilterUser}}</h5>
+                    <p>Neither this username nor its certificate appears in the attempt log yet.</p>
+                    {{else}}
                     <h5>No login attempts recorded</h5>
                     <p>Attempts appear here once a client authenticates with a password. The log is written by auth.sh on the OpenVPN server.</p>
+                    {{end}}
                 </div>
                 {{end}}
             </div>
