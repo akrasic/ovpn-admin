@@ -1206,6 +1206,7 @@ func main() {
 			return a + b
 		},
 		"humanBytes": humanBytes,
+		"relTime":    relTime,
 		"dict": func(values ...interface{}) map[string]interface{} {
 			dict := make(map[string]interface{})
 			for i := 0; i+1 < len(values); i += 2 {
@@ -1949,6 +1950,80 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string, er
 	log.Infof("Certificate for user %s issued", username)
 
 	return true, ucErr, nil
+}
+
+// plural spells out a count with its unit: "1 day", "3 days".
+func plural(n int, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
+}
+
+// humanDuration renders a duration at the precision a table scan needs: one
+// unit, except years, which carry the leftover months so a certificate's
+// remaining life does not round away by up to a year.
+func humanDuration(d time.Duration) string {
+	const day = 24 * time.Hour
+	const month = 30 * day
+	const year = 365 * day
+	switch {
+	case d < time.Minute:
+		return "under a minute"
+	case d < time.Hour:
+		return plural(int(d/time.Minute), "minute")
+	case d < day:
+		return plural(int(d/time.Hour), "hour")
+	case d < month:
+		return plural(int(d/day), "day")
+	case d < year:
+		return plural(int(d/month), "month")
+	default:
+		years := int(d / year)
+		months := int((d % year) / month)
+		// 30-day months against a 365-day year: a remainder just short of a
+		// year would otherwise read "1 year, 12 months".
+		if months >= 12 {
+			years++
+			months = 0
+		}
+		if months == 0 {
+			return plural(years, "year")
+		}
+		return plural(years, "year") + ", " + plural(months, "month")
+	}
+}
+
+// relTimeLayouts are the timestamp shapes the UI renders: index/certificate
+// dates and auth.sh's log stamps. Both are UTC.
+var relTimeLayouts = []string{stringDateFormat, time.RFC3339}
+
+// relTime is the template helper behind every date cell: it turns a timestamp
+// into its distance from now ("3 days ago", "in 9 years, 2 months") for
+// scanning, while the exact stamp stays on the hover title. A value it cannot
+// parse is returned unchanged, so a foreign date degrades to what it was.
+func relTime(ts string) string {
+	if ts == "" {
+		return ""
+	}
+	var t time.Time
+	var err error
+	for _, layout := range relTimeLayouts {
+		if t, err = time.Parse(layout, ts); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return ts
+	}
+	if d := time.Until(t); d >= 0 {
+		return "in " + humanDuration(d)
+	}
+	s := humanDuration(-time.Until(t))
+	if s == "under a minute" {
+		return "just now"
+	}
+	return s + " ago"
 }
 
 // hxToast builds the HX-Trigger payload sent after a successful mutation: the toast to

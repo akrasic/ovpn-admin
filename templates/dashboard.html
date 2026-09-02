@@ -54,7 +54,7 @@
                         <span class="username">{{.Username}}</span>
                     </span>
                     <span class="recent-login-meta">{{if ne .Outcome "success"}}{{.Outcome}} &middot; {{end}}{{.Source}}</span>
-                    <span class="recent-login-time">{{.Timestamp}}</span>
+                    <span class="recent-login-time" title="{{.Timestamp}}">{{relTime .Timestamp}}</span>
                 </li>
                 {{end}}
             </ul>

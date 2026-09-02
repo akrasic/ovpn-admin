@@ -23,7 +23,7 @@
             {{end}}
         </div>
         {{if $user.LastLogin}}
-        <span class="last-login" title="Last successful login (UTC)">last login {{$user.LastLogin}}</span>
+        <span class="last-login" title="Last successful login {{$user.LastLogin}}">last login {{relTime $user.LastLogin}}</span>
         {{end}}
     </td>
     <td>
@@ -46,15 +46,16 @@
     </td>
     <td>
         {{if $user.CreationDate}}
-        <span class="text-muted" title="Certificate issued (UTC)">{{$user.CreationDate}}</span>
+        <span class="text-muted" title="Issued {{$user.CreationDate}} UTC">{{relTime $user.CreationDate}}</span>
         {{else}}
         <span class="text-muted">-</span>
         {{end}}
     </td>
     <td>
         {{if $user.ExpirationDate}}
-        <span class="{{if $user.ExpiringSoon}}text-warning fw-semibold{{else}}text-muted{{end}}">
-            {{$user.ExpirationDate}}
+        <span class="{{if $user.ExpiringSoon}}text-warning fw-semibold{{else}}text-muted{{end}}"
+              title="{{if eq $user.AccountStatus "Expired"}}Expired{{else}}Expires{{end}} {{$user.ExpirationDate}} UTC">
+            {{relTime $user.ExpirationDate}}
         </span>
         {{if $user.ExpiringSoon}}
         <span class="expiring-badge" title="Certificate expiring soon">
@@ -67,7 +68,7 @@
     </td>
     <td>
         {{if $user.RevocationDate}}
-        <span class="text-muted">{{$user.RevocationDate}}</span>
+        <span class="text-muted" title="Revoked {{$user.RevocationDate}} UTC">{{relTime $user.RevocationDate}}</span>
         {{else}}
         <span class="text-muted">-</span>
         {{end}}

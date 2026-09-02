@@ -25,7 +25,7 @@
                         <tbody>
                             {{range .Attempts}}
                             <tr>
-                                <td class="activity-time">{{.Timestamp}}</td>
+                                <td class="activity-time" title="{{.Timestamp}}">{{relTime .Timestamp}}</td>
                                 <td>
                                     {{if eq .Outcome "success"}}
                                     <span class="status-badge status-active">Success</span>

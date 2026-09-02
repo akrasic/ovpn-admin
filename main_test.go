@@ -43,6 +43,7 @@ func newTestOvpnAdmin() *OvpnAdmin {
 			return a + b
 		},
 		"humanBytes": humanBytes,
+		"relTime":    relTime,
 		"dict": func(values ...interface{}) map[string]interface{} {
 			dict := make(map[string]interface{})
 			for i := 0; i < len(values); i += 2 {
@@ -2503,8 +2504,13 @@ func TestUserRows_ShowFailedLoginsAndLastLogin(t *testing.T) {
 	if !strings.Contains(body, "3 failed") {
 		t.Error("a user with failures since their last login should carry a failed badge")
 	}
-	if !strings.Contains(body, "last login 2026-09-01T10:00:00Z") {
-		t.Error("the last successful login should be shown under the username")
+	// The visible text is relative ("2 days ago"); the exact stamp moves to the
+	// hover title.
+	if !strings.Contains(body, "last login "+relTime("2026-09-01T10:00:00Z")) {
+		t.Error("the last successful login should be shown, relative, under the username")
+	}
+	if !strings.Contains(body, `title="Last successful login 2026-09-01T10:00:00Z"`) {
+		t.Error("the exact login timestamp should stay available on hover")
 	}
 	if strings.Count(body, "failed-badge") != 1 || strings.Count(body, "last-login") != 1 {
 		t.Error("users without recorded activity must not render activity markup")
@@ -3528,5 +3534,101 @@ func TestUsersPage_StatusFilterAndSortableHeaders(t *testing.T) {
 	}
 	if strings.Contains(body, "Hide Revoked") {
 		t.Error("the Hide Revoked toggle is replaced by the status filter")
+	}
+}
+
+// =============================================================================
+// Relative time rendering
+// =============================================================================
+
+func TestHumanDuration(t *testing.T) {
+	const day = 24 * time.Hour
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{20 * time.Second, "under a minute"},
+		{time.Minute, "1 minute"},
+		{45 * time.Minute, "45 minutes"},
+		{3 * time.Hour, "3 hours"},
+		{day, "1 day"},
+		{12 * day, "12 days"},
+		{45 * day, "1 month"},
+		{200 * day, "6 months"},
+		{365 * day, "1 year"},
+		{3650 * day, "10 years"},
+		// Years keep their leftover months so a certificate's remaining life
+		// does not round away by up to a year.
+		{365*day + 70*day, "1 year, 2 months"},
+	}
+	for _, tc := range cases {
+		if got := humanDuration(tc.d); got != tc.want {
+			t.Errorf("humanDuration(%v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}
+
+func TestRelTime(t *testing.T) {
+	past := time.Now().UTC().Add(-3 * 24 * time.Hour)
+	if got := relTime(past.Format(stringDateFormat)); got != "3 days ago" {
+		t.Errorf("index-format past: got %q, want %q", got, "3 days ago")
+	}
+	if got := relTime(past.Format(time.RFC3339)); got != "3 days ago" {
+		t.Errorf("auth-log-format past: got %q, want %q", got, "3 days ago")
+	}
+
+	future := time.Now().UTC().Add(40 * 24 * time.Hour)
+	if got := relTime(future.Format(stringDateFormat)); got != "in 1 month" {
+		t.Errorf("future: got %q, want %q", got, "in 1 month")
+	}
+
+	if got := relTime(time.Now().UTC().Format(time.RFC3339)); got != "just now" {
+		t.Errorf("moments ago: got %q, want %q", got, "just now")
+	}
+
+	// A value that parses as neither layout must pass through untouched, and an
+	// empty one must stay empty - the templates guard presence themselves.
+	if got := relTime("not a date"); got != "not a date" {
+		t.Errorf("unparseable input should pass through, got %q", got)
+	}
+	if got := relTime(""); got != "" {
+		t.Errorf("empty input should stay empty, got %q", got)
+	}
+}
+
+func TestUserRows_DatesRenderRelativeWithExactHover(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	created := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(stringDateFormat)
+	expires := time.Now().UTC().Add((2*365 + 20) * 24 * time.Hour).Format(stringDateFormat)
+	revoked := time.Now().UTC().Add(-2 * time.Hour).Format(stringDateFormat)
+
+	w := httptest.NewRecorder()
+	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
+		"Users": []OpenvpnClient{{
+			Identity:       "alice",
+			AccountStatus:  "Revoked",
+			CreationDate:   created,
+			ExpirationDate: expires,
+			RevocationDate: revoked,
+		}},
+		"ServerRole": "master",
+	})
+	if err != nil {
+		t.Fatalf("rendering user_rows: %v", err)
+	}
+	body := w.Body.String()
+
+	for visible, hover := range map[string]string{
+		"1 month ago": `title="Issued ` + created + ` UTC"`,
+		"in 2 years":  `title="Expires ` + expires + ` UTC"`,
+		"2 hours ago": `title="Revoked ` + revoked + ` UTC"`,
+	} {
+		if !strings.Contains(body, ">"+visible+"<") && !strings.Contains(body, visible) {
+			t.Errorf("the row should show %q", visible)
+		}
+		if !strings.Contains(body, hover) {
+			t.Errorf("the exact timestamp should stay on hover: missing %s", hover)
+		}
 	}
 }
