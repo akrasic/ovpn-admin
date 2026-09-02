@@ -338,6 +338,9 @@ func (oAdmin *OvpnAdmin) userListHandler(w http.ResponseWriter, r *http.Request)
 
 	users := oAdmin.visibleUsers(r)
 
+	addHxTriggerEvent(w, "resultCount", map[string]string{
+		"label": countLabel(len(users), len(oAdmin.getClients()), oAdmin.filtersActive(r)),
+	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
 		"Users":      users,
@@ -683,6 +686,38 @@ func (oAdmin *OvpnAdmin) userAccountStatus(username string) string {
 	return ""
 }
 
+// countLabel is the row-count announcement beside the search box. When a filter
+// narrows the table it says how much was hidden - the client alone cannot know
+// the total behind its rows.
+func countLabel(shown, total int, filtered bool) string {
+	if filtered {
+		return fmt.Sprintf("%d of %d users", shown, total)
+	}
+	if shown == 1 {
+		return "1 user"
+	}
+	return fmt.Sprintf("%d users", shown)
+}
+
+// addHxTriggerEvent merges one event into the response's HX-Trigger header,
+// preserving whatever a handler already put there (the mutation toast).
+func addHxTriggerEvent(w http.ResponseWriter, name string, detail interface{}) {
+	payload := map[string]interface{}{}
+	if existing := w.Header().Get("HX-Trigger"); existing != "" {
+		if err := json.Unmarshal([]byte(existing), &payload); err != nil {
+			log.Errorf("addHxTriggerEvent: existing HX-Trigger unreadable: %v", err)
+			payload = map[string]interface{}{}
+		}
+	}
+	payload[name] = detail
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		log.Errorf("addHxTriggerEvent: %v", err)
+		return
+	}
+	w.Header().Set("HX-Trigger", string(encoded))
+}
+
 // Helper function to render user rows
 func (oAdmin *OvpnAdmin) renderUserRows(w http.ResponseWriter, r *http.Request) {
 	// usersList reads activeClients to decide who is online, so refresh that first or the
@@ -692,6 +727,9 @@ func (oAdmin *OvpnAdmin) renderUserRows(w http.ResponseWriter, r *http.Request) 
 
 	users := oAdmin.visibleUsers(r)
 
+	addHxTriggerEvent(w, "resultCount", map[string]string{
+		"label": countLabel(len(users), len(oAdmin.getClients()), oAdmin.filtersActive(r)),
+	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := oAdmin.htmlTemplates.ExecuteTemplate(w, "user_rows", map[string]interface{}{
 		"Users":      users,

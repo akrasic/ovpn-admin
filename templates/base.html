@@ -599,14 +599,14 @@
             updateBulkActions();
         }
 
-        // Report how many rows are listed. The element is a live region, so this doubles
-        // as the announcement for htmx swaps, which were previously silent.
-        function updateResultCount() {
+        // The row responses announce their own count via the resultCount trigger:
+        // "8 of 84 users" needs the unfiltered total, which the DOM alone cannot
+        // know. The element is a live region, so setting its text announces the
+        // swap to screen readers too.
+        document.body.addEventListener('resultCount', function(e) {
             const label = document.getElementById('result-count');
-            if (!label) return;
-            const rows = document.querySelectorAll('#user-table-body tr[id^="user-row-"]').length;
-            label.textContent = rows === 1 ? '1 user' : rows + ' users';
-        }
+            if (label) label.textContent = e.detail.label;
+        });
 
         // The rows are re-rendered by search, by an explicit refresh and by every mutating
         // action, all of which replace the checkboxes with unchecked ones. Put
@@ -644,7 +644,6 @@
             initPasswordInputs();
             if (e.detail.target?.id === 'user-table-body') {
                 restoreSelection();
-                updateResultCount();
             }
             if (e.detail.target?.id === 'modal-container') {
                 initModal();

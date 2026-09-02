@@ -3632,3 +3632,82 @@ func TestUserRows_DatesRenderRelativeWithExactHover(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// Row count announcements + busy indicator
+// =============================================================================
+
+func TestCountLabel(t *testing.T) {
+	cases := []struct {
+		shown, total int
+		filtered     bool
+		want         string
+	}{
+		{84, 84, false, "84 users"},
+		{1, 1, false, "1 user"},
+		{0, 0, false, "0 users"},
+		{8, 84, true, "8 of 84 users"},
+		{0, 84, true, "0 of 84 users"},
+	}
+	for _, tc := range cases {
+		if got := countLabel(tc.shown, tc.total, tc.filtered); got != tc.want {
+			t.Errorf("countLabel(%d, %d, %v) = %q, want %q", tc.shown, tc.total, tc.filtered, got, tc.want)
+		}
+	}
+}
+
+func TestUserListHandler_AnnouncesResultCount(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+	oAdmin.clients = []OpenvpnClient{
+		{Identity: "alice", AccountStatus: "Active"},
+		{Identity: "bob", AccountStatus: "Revoked"},
+	}
+
+	w := httptest.NewRecorder()
+	oAdmin.userListHandler(w, httptest.NewRequest(http.MethodGet, "/partials/users", nil))
+	if got := w.Header().Get("HX-Trigger"); !strings.Contains(got, `"label":"2 users"`) {
+		t.Errorf("an unfiltered list should announce its plain count, got %q", got)
+	}
+
+	w = httptest.NewRecorder()
+	filtered := httptest.NewRequest(http.MethodGet, "/partials/users", nil)
+	filtered.AddCookie(&http.Cookie{Name: "statusFilter", Value: "active"})
+	oAdmin.userListHandler(w, filtered)
+	if got := w.Header().Get("HX-Trigger"); !strings.Contains(got, `"label":"1 of 2 users"`) {
+		t.Errorf("a filtered list should announce shown-of-total, got %q", got)
+	}
+}
+
+func TestAddHxTriggerEvent_PreservesTheMutationToast(t *testing.T) {
+	w := httptest.NewRecorder()
+	w.Header().Set("HX-Trigger", hxToast("User alice revoked", "warn"))
+
+	addHxTriggerEvent(w, "resultCount", map[string]string{"label": "7 users"})
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(w.Header().Get("HX-Trigger")), &payload); err != nil {
+		t.Fatalf("merged HX-Trigger is not valid JSON: %v", err)
+	}
+	for _, event := range []string{"showToast", "refreshStats", "resultCount"} {
+		if _, present := payload[event]; !present {
+			t.Errorf("the merged header should still carry %q", event)
+		}
+	}
+}
+
+func TestUsersPage_TableRefetchHasBusyIndicator(t *testing.T) {
+	oAdmin := newTestOvpnAdmin()
+
+	w := httptest.NewRecorder()
+	oAdmin.indexPageHandler(w, httptest.NewRequest(http.MethodGet, "/users", nil))
+	body := w.Body.String()
+
+	// The search box has its own spinner; filter, sort and refresh go through the
+	// tbody's request and need one too, or a slow link shows nothing at all.
+	if !strings.Contains(body, `hx-indicator="#table-indicator"`) {
+		t.Error("the tbody request should point at the table busy indicator")
+	}
+	if !strings.Contains(body, `id="table-indicator"`) {
+		t.Error("the toolbar should carry the table busy indicator")
+	}
+}

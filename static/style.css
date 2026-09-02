@@ -544,7 +544,9 @@ body {
     color: var(--text-secondary);
     font-size: 0.8125rem;
     font-weight: 500;
-    padding: 0.3125rem 0.75rem;
+    /* Sized so the whole control lands on the same ~31px overall height as the
+       btn-sm buttons beside it (track border+padding add 6px). */
+    padding: 0.1875rem 0.75rem;
     border-radius: calc(var(--radius) - 2px);
     transition: background-color 0.15s ease, color 0.15s ease;
 }
@@ -556,7 +558,19 @@ body {
 .segmented-btn.active {
     background: var(--bg-primary);
     color: var(--text-primary);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+    /* The inset ring, not the drop shadow, is what reads in dark mode: there the
+       pill fill is darker than the track and a drop shadow disappears. */
+    box-shadow: inset 0 0 0 1px var(--border-color), 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Busy indicator for the row refetches the tbody issues (filter, sort, refresh).
+   The search box has its own spinner; this covers the other paths. The span
+   keeps its width when idle so the toolbar does not shift. */
+.table-spinner {
+    display: inline-flex;
+    width: 1rem;
+    justify-content: center;
+    color: var(--primary);
 }
 
 /* =========================================================================

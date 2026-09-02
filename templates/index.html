@@ -58,6 +58,9 @@
             {{end}}
         </div>
         <div class="toolbar-right">
+            <span class="table-spinner htmx-indicator" id="table-indicator" aria-hidden="true">
+                <span class="spinner-border spinner-border-sm"></span>
+            </span>
             <span class="result-count" id="result-count" role="status" aria-live="polite"></span>
             <div class="search-wrapper">
                 <i class="bi bi-search search-icon"></i>
@@ -107,6 +110,7 @@
                        hx-get="/partials/users"
                        hx-trigger="load, refresh"
                        hx-include="[name='search']"
+                       hx-indicator="#table-indicator"
                        hx-swap="innerHTML">
                     <!-- User rows loaded via HTMX -->
                 </tbody>
