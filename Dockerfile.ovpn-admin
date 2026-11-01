@@ -1,14 +1,15 @@
-FROM golang:1.25.14-bookworm AS builder
+FROM golang:1.27.3-trixie AS builder
 COPY . /app
 ARG TARGETARCH
-RUN cd /app && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -a -tags netgo -ldflags '-linkmode external -extldflags -static -s -w' -o ovpn-admin
+RUN cd /app && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -a -tags netgo -ldflags '-linkmode external -extldflags -static -s -w' -o ovpn-admin \
+    && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -tags netgo -ldflags '-linkmode external -extldflags -static -s -w' -o openvpn-user ./cmd/openvpn-user
 
-FROM alpine:3.23
+FROM alpine:3.24
 WORKDIR /app
 COPY --from=builder /app/ovpn-admin /app
+COPY --from=builder /app/openvpn-user /usr/local/bin/openvpn-user
 ARG TARGETARCH
-RUN apk add --update bash easy-rsa openssl openvpn coreutils  && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates bash easy-rsa openssl openvpn coreutils && \
     ln -s /usr/share/easy-rsa/easyrsa /usr/local/bin && \
-    wget https://github.com/pashcovich/openvpn-user/releases/download/v1.0.4/openvpn-user-linux-${TARGETARCH}.tar.gz -O - | tar xz -C /usr/local/bin && \
     rm -rf /tmp/* /var/tmp/* /var/cache/apk/* /var/cache/distfiles/*
-RUN if [ -f "/usr/local/bin/openvpn-user-${TARGETARCH}" ]; then ln -s /usr/local/bin/openvpn-user-${TARGETARCH} /usr/local/bin/openvpn-user; fi

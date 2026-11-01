@@ -1,9 +1,14 @@
-FROM alpine:3.23
+FROM golang:1.27.3-trixie AS builder
+COPY . /app
 ARG TARGETARCH
-RUN apk add --update bash openvpn easy-rsa iptables  && \
+RUN cd /app && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -tags netgo -ldflags '-linkmode external -extldflags -static -s -w' -o openvpn-user ./cmd/openvpn-user
+
+FROM alpine:3.24
+ARG TARGETARCH
+COPY --from=builder /app/openvpn-user /usr/local/bin/openvpn-user
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates bash openvpn easy-rsa iptables && \
     ln -s /usr/share/easy-rsa/easyrsa /usr/local/bin && \
-    wget https://github.com/pashcovich/openvpn-user/releases/download/v1.0.4/openvpn-user-linux-${TARGETARCH}.tar.gz -O - | tar xz -C /usr/local/bin && \
     rm -rf /tmp/* /var/tmp/* /var/cache/apk/* /var/cache/distfiles/*
-RUN if [ -f "/usr/local/bin/openvpn-user-${TARGETARCH}" ]; then ln -s /usr/local/bin/openvpn-user-${TARGETARCH} /usr/local/bin/openvpn-user; fi
 COPY setup/ /etc/openvpn/setup
 RUN chmod +x /etc/openvpn/setup/configure.sh

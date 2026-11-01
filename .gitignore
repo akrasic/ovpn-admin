@@ -19,3 +19,7 @@ ccd_slave
 
 # Build output
 ovpn-admin
+
+# openvpn-user build output
+/openvpn-user
+cmd/openvpn-user/openvpn-user

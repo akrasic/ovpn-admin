@@ -1,18 +1,21 @@
 # Combined OpenVPN Server + ovpn-admin Dockerfile
 # Runs both OpenVPN and the web admin interface in a single container
 
-FROM golang:1.24.6-bullseye AS builder
+FROM golang:1.27.3-trixie AS builder
 COPY . /app
 ARG TARGETARCH
-RUN cd /app && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -a -tags netgo -ldflags '-linkmode external -extldflags -static -s -w' -o ovpn-admin
+RUN cd /app && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -a -tags netgo -ldflags '-linkmode external -extldflags -static -s -w' -o ovpn-admin \
+    && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -tags netgo -ldflags '-linkmode external -extldflags -static -s -w' -o openvpn-user ./cmd/openvpn-user
 
-FROM alpine:3.23
+FROM alpine:3.24
 WORKDIR /app
 
 ARG TARGETARCH
 
 # Install OpenVPN, Easy-RSA, and dependencies
-RUN apk add --update --no-cache \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache \
+    ca-certificates \
     bash \
     openvpn \
     easy-rsa \
@@ -21,16 +24,11 @@ RUN apk add --update --no-cache \
     coreutils \
     supervisor \
     && ln -s /usr/share/easy-rsa/easyrsa /usr/local/bin \
-    && wget https://github.com/pashcovich/openvpn-user/releases/download/v1.0.4/openvpn-user-linux-${TARGETARCH}.tar.gz -O - | tar xz -C /usr/local/bin \
     && rm -rf /tmp/* /var/tmp/* /var/cache/apk/* /var/cache/distfiles/*
 
-# Link openvpn-user binary if arch-specific version exists
-RUN if [ -f "/usr/local/bin/openvpn-user-${TARGETARCH}" ]; then \
-    ln -s /usr/local/bin/openvpn-user-${TARGETARCH} /usr/local/bin/openvpn-user; \
-    fi
-
-# Copy ovpn-admin binary
+# Copy ovpn-admin and openvpn-user binaries
 COPY --from=builder /app/ovpn-admin /app/ovpn-admin
+COPY --from=builder /app/openvpn-user /usr/local/bin/openvpn-user
 
 # Copy setup scripts
 COPY setup/ /etc/openvpn/setup/
